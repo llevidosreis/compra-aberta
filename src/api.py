@@ -8,6 +8,7 @@ import psycopg2.extras
 import psycopg2
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 
 from src.config import carregar_config
 from src.db import conexao
@@ -24,6 +25,173 @@ app.add_middleware(
     allow_methods=["GET"],
     allow_headers=["*"],
 )
+
+
+class Paginacao(BaseModel):
+    limit: int
+    offset: int
+
+
+class Municipio(BaseModel):
+    codigo_municipio: str
+    nome: str
+    uf: str
+    codigo_ibge: str | None = None
+    codigo_geonames: str | None = None
+
+
+class MunicipiosResponse(Paginacao):
+    data: list[Municipio]
+
+
+class Licitacao(BaseModel):
+    id: int
+    codigo_municipio: str
+    municipio: str
+    numero_licitacao: str
+    data_realizacao_licitacao: str | None = None
+    valor_total_licitacao: str
+    quantidade_empresas: int
+    quantidade_itens: int
+    atualizado_em: str
+    naturezas_despesa: list[str]
+
+
+class LicitacoesResponse(Paginacao):
+    data: list[Licitacao]
+
+
+class Dotacao(BaseModel):
+    id: int
+    codigo_municipio: str
+    numero_licitacao: str
+    data_realizacao_licitacao: str | None = None
+    exercicio_orcamento: int
+    codigo_orgao: str | None = None
+    codigo_unidade_orcamentaria: str | None = None
+    codigo_funcao: str | None = None
+    codigo_subfuncao: str | None = None
+    codigo_programa: str | None = None
+    codigo_projeto_atividade: str | None = None
+    numero_projeto_atividade: str | None = None
+    numero_subprojeto_atividade: str | None = None
+    codigo_elemento_despesa: str
+    codigo_natureza: str | None = None
+    nome_natureza: str | None = None
+    tipo_fonte: str | None = None
+    codigo_fonte: str | None = None
+    valor_dotacao_doc: str | None = None
+    data_referencia_doc: int
+
+
+class DotacoesResponse(Paginacao):
+    data: list[Dotacao]
+
+
+class ItemLicitacao(BaseModel):
+    id: int
+    codigo_municipio: str
+    numero_licitacao: str
+    numero_sequencial_item_licitacao: int
+    cnpj: str
+    razao_social: str | None = None
+    porte_empresa: str | None = None
+    descricao_item_licitacao: str | None = None
+    unidade: str | None = None
+    quantidade: str | None = None
+    valor_unitario: str | None = None
+    valor_vencedor: str | None = None
+    data_realizacao_licitacao: str | None = None
+
+
+class ItensResponse(Paginacao):
+    data: list[ItemLicitacao]
+
+
+class Participacao(BaseModel):
+    id: int
+    codigo_municipio: str
+    municipio: str
+    numero_licitacao: str
+    cnpj: str
+    razao_social: str | None = None
+    porte_empresa: str | None = None
+    cnae_principal: str | None = None
+    valor_total_vencido: str
+    quantidade_itens_vencidos: int
+    data_realizacao_licitacao: str | None = None
+
+
+class ParticipacoesResponse(Paginacao):
+    data: list[Participacao]
+
+
+class Empresa(BaseModel):
+    cnpj: str
+    razao_social: str | None = None
+    nome_fantasia: str | None = None
+    situacao_cadastral: str | None = None
+    cnae_principal: str | None = None
+    porte_empresa: str | None = None
+    uf_empresa: str | None = None
+    municipio_empresa: str | None = None
+    encontrado_opencnpj: bool | None = None
+    consultado_em: str | None = None
+    atualizado_em: str
+
+
+class EmpresasResponse(Paginacao):
+    data: list[Empresa]
+
+
+class GastoPorNatureza(BaseModel):
+    codigo_natureza: str
+    nome_natureza: str
+    valor_total_dotacao: str
+    quantidade_dotacoes: int
+    quantidade_licitacoes: int
+
+
+class GastosPorNaturezaResponse(BaseModel):
+    data: list[GastoPorNatureza]
+    metrica: str
+    observacao: str
+
+
+class IndicadorMicroempresas(BaseModel):
+    quantidade_microempresas: int
+    quantidade_licitacoes: int
+    quantidade_participacoes: int
+    valor_total_vencido: str
+    quantidade_itens_vencidos: int
+
+
+class MicroempresasResponse(BaseModel):
+    data: IndicadorMicroempresas
+    porte_considerado: list[str]
+
+
+class ParticipacaoMePorNatureza(BaseModel):
+    codigo_natureza: str
+    nome_natureza: str
+    quantidade_licitacoes: int
+    licitacoes_com_me: int
+    percentual_licitacoes_com_me: float | None = None
+    quantidade_participacoes: int
+    participacoes_me: int
+    percentual_participacoes_me: float | None = None
+    valor_vencido: str
+    valor_vencido_me: str
+    percentual_valor_vencido_me: float | None = None
+    itens_vencidos: int
+    itens_vencidos_me: int
+    percentual_itens_vencidos_me: float | None = None
+
+
+class ParticipacaoMePorNaturezaResponse(BaseModel):
+    data: list[ParticipacaoMePorNatureza]
+    associacao: str
+    observacao: str
 
 
 def _serializar(valor: Any) -> Any:
@@ -93,7 +261,7 @@ def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
-@app.get("/municipios", tags=["dimensões"])
+@app.get("/municipios", response_model=MunicipiosResponse, tags=["dimensões"])
 def municipios(
     uf: str | None = Query(default=None, min_length=2, max_length=2),
     limit: int = Query(default=100, ge=1, le=100),
@@ -114,7 +282,7 @@ def municipios(
     return {"data": rows, "limit": limit, "offset": offset}
 
 
-@app.get("/licitacoes", tags=["licitações"])
+@app.get("/licitacoes", response_model=LicitacoesResponse, tags=["licitações"])
 def licitacoes(
     codigo_municipio: str | None = Query(default=None, max_length=20),
     codigo_natureza: str | None = Query(default=None, min_length=2, max_length=2),
@@ -179,6 +347,7 @@ def licitacoes(
 
 @app.get(
     "/licitacoes/{codigo_municipio}/{numero_licitacao}/dotacoes",
+    response_model=DotacoesResponse,
     tags=["licitações"],
 )
 def dotacoes_licitacao(
@@ -210,7 +379,11 @@ def dotacoes_licitacao(
     return {"data": rows, "limit": limit, "offset": offset}
 
 
-@app.get("/licitacoes/{codigo_municipio}/{numero_licitacao}/itens", tags=["licitações"])
+@app.get(
+    "/licitacoes/{codigo_municipio}/{numero_licitacao}/itens",
+    response_model=ItensResponse,
+    tags=["licitações"],
+)
 def itens_licitacao(
     codigo_municipio: str,
     numero_licitacao: str,
@@ -237,7 +410,7 @@ def itens_licitacao(
     return {"data": rows, "limit": limit, "offset": offset}
 
 
-@app.get("/participacoes", tags=["empresas"])
+@app.get("/participacoes", response_model=ParticipacoesResponse, tags=["empresas"])
 def participacoes(
     codigo_municipio: str | None = Query(default=None, max_length=20),
     porte_empresa: str | None = Query(default=None, max_length=100),
@@ -281,7 +454,7 @@ def participacoes(
     return {"data": rows, "limit": limit, "offset": offset}
 
 
-@app.get("/empresas", tags=["empresas"])
+@app.get("/empresas", response_model=EmpresasResponse, tags=["empresas"])
 def empresas(
     porte_empresa: str | None = Query(default=None, max_length=100),
     cnae_principal: str | None = Query(default=None, max_length=20),
@@ -314,7 +487,11 @@ def empresas(
     return {"data": rows, "limit": limit, "offset": offset}
 
 
-@app.get("/analytics/gastos-por-natureza", tags=["indicadores"])
+@app.get(
+    "/analytics/gastos-por-natureza",
+    response_model=GastosPorNaturezaResponse,
+    tags=["indicadores"],
+)
 def gastos_por_natureza(
     codigo_municipio: str | None = Query(default=None, max_length=20),
     data_inicio: date | None = None,
@@ -352,7 +529,11 @@ def gastos_por_natureza(
     }
 
 
-@app.get("/analytics/microempresas", tags=["indicadores"])
+@app.get(
+    "/analytics/microempresas",
+    response_model=MicroempresasResponse,
+    tags=["indicadores"],
+)
 def indicador_microempresas(
     codigo_municipio: str | None = Query(default=None, max_length=20),
     codigo_natureza: str | None = Query(default=None, min_length=2, max_length=2),
@@ -399,7 +580,11 @@ def indicador_microempresas(
     return {"data": rows[0], "porte_considerado": ["ME", "Microempresa", "Microempresa (ME)"]}
 
 
-@app.get("/analytics/participacao-me-por-natureza", tags=["indicadores"])
+@app.get(
+    "/analytics/participacao-me-por-natureza",
+    response_model=ParticipacaoMePorNaturezaResponse,
+    tags=["indicadores"],
+)
 def participacao_me_por_natureza(
     codigo_municipio: str | None = Query(default=None, max_length=20),
     data_inicio: date | None = None,
