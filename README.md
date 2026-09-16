@@ -250,6 +250,9 @@ GET /licitacoes/{codigo_municipio}/{numero_licitacao}/itens
 GET /licitacoes/{codigo_municipio}/{numero_licitacao}/dotacoes
 GET /participacoes
 GET /empresas
+GET /analytics/gastos-por-natureza
+GET /analytics/microempresas
+GET /analytics/participacao-me-por-natureza
 ```
 
 O endpoint `GET /licitacoes` aceita `codigo_natureza` para filtrar
@@ -261,6 +264,20 @@ GET /licitacoes?codigo_natureza=30
 
 Todos os endpoints de listagem têm paginação por `limit` e `offset`. Os
 filtros disponíveis estão descritos automaticamente no `/docs`.
+
+Indicadores analíticos:
+
+- `/analytics/gastos-por-natureza` soma `valor_dotacao_doc` por natureza,
+  município e período. Esse valor é uma dotação associada à contratação,
+  não representa pagamento efetivo.
+- `/analytics/microempresas` consolida empresas ME vencedoras, licitações,
+  participações, itens e valor vencido, com filtros de município, natureza e
+  período.
+- `/analytics/participacao-me-por-natureza` retorna os percentuais de
+  licitações, participações, valor vencido e itens vencidos relacionados a
+  microempresas. Como o TCE não relaciona diretamente cada item à natureza,
+  a associação é feita no nível da licitação; uma licitação com várias
+  naturezas aparece em cada natureza relacionada.
 
 ## Limitações conhecidas
 

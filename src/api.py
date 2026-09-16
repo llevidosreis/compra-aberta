@@ -45,6 +45,45 @@ def _linhas(sql: str, parametros: tuple[Any, ...]) -> list[dict[str, Any]]:
             ]
 
 
+def _validar_periodo(data_inicio: date | None, data_fim: date | None) -> None:
+    if data_inicio and data_fim and data_inicio > data_fim:
+        raise HTTPException(status_code=400, detail="data_inicio não pode ser posterior a data_fim")
+
+
+def _filtros_data(
+    alias: str, data_inicio: date | None, data_fim: date | None
+) -> tuple[list[str], list[Any]]:
+    filtros: list[str] = []
+    valores: list[Any] = []
+    if data_inicio:
+        filtros.append(f"{alias}.data_realizacao_licitacao >= %s")
+        valores.append(data_inicio)
+    if data_fim:
+        filtros.append(f"{alias}.data_realizacao_licitacao <= %s")
+        valores.append(data_fim)
+    return filtros, valores
+
+
+def _porte_microempresa_sql(alias: str) -> str:
+    return f"""
+        LOWER(TRIM(COALESCE({alias}.porte_empresa, ''))) IN (
+            'me', 'microempresa', 'microempresa (me)'
+        )
+    """
+
+
+def _validar_codigo_natureza(codigo_natureza: str | None) -> None:
+    if codigo_natureza and not _linhas(
+        """
+        SELECT codigo_natureza
+        FROM compra_livre.dim_natureza_despesa
+        WHERE codigo_natureza = %s
+        """,
+        (codigo_natureza,),
+    ):
+        raise HTTPException(status_code=400, detail="codigo_natureza não cadastrado")
+
+
 @app.get("/health", tags=["sistema"])
 def health() -> dict[str, str]:
     try:
@@ -84,26 +123,14 @@ def licitacoes(
     limit: int = Query(default=50, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
 ) -> dict[str, Any]:
-    if data_inicio and data_fim and data_inicio > data_fim:
-        raise HTTPException(status_code=400, detail="data_inicio não pode ser posterior a data_fim")
+    _validar_periodo(data_inicio, data_fim)
     filtros: list[str] = []
     valores: list[Any] = []
     if codigo_municipio:
         filtros.append("f.codigo_municipio = %s")
         valores.append(codigo_municipio)
     if codigo_natureza:
-        if not _linhas(
-            """
-            SELECT codigo_natureza
-            FROM compra_livre.dim_natureza_despesa
-            WHERE codigo_natureza = %s
-            """,
-            (codigo_natureza,),
-        ):
-            raise HTTPException(
-                status_code=400,
-                detail="codigo_natureza não cadastrado",
-            )
+        _validar_codigo_natureza(codigo_natureza)
         filtros.append(
             """
             EXISTS (
@@ -285,3 +312,198 @@ def empresas(
         tuple(valores),
     )
     return {"data": rows, "limit": limit, "offset": offset}
+
+
+@app.get("/analytics/gastos-por-natureza", tags=["indicadores"])
+def gastos_por_natureza(
+    codigo_municipio: str | None = Query(default=None, max_length=20),
+    data_inicio: date | None = None,
+    data_fim: date | None = None,
+) -> dict[str, Any]:
+    """Agrega o valor das dotações classificadas nas sete naturezas.
+
+    O valor retornado é dotação associada à contratação, não pagamento efetivo.
+    """
+    _validar_periodo(data_inicio, data_fim)
+    filtros, valores = _filtros_data("d", data_inicio, data_fim)
+    if codigo_municipio:
+        filtros.append("d.codigo_municipio = %s")
+        valores.append(codigo_municipio)
+    where = f"WHERE {' AND '.join(filtros)}" if filtros else ""
+    return {
+        "data": _linhas(
+            f"""
+            SELECT d.codigo_natureza, n.nome_natureza,
+                   COALESCE(SUM(d.valor_dotacao_doc), 0) AS valor_total_dotacao,
+                   COUNT(*) AS quantidade_dotacoes,
+                   COUNT(DISTINCT (d.codigo_municipio, d.numero_licitacao))
+                       AS quantidade_licitacoes
+            FROM compra_livre.fato_dotacao_licitacao d
+            JOIN compra_livre.dim_natureza_despesa n
+              ON n.codigo_natureza = d.codigo_natureza
+            {where}
+            GROUP BY d.codigo_natureza, n.nome_natureza
+            ORDER BY d.codigo_natureza
+            """,
+            tuple(valores),
+        ),
+        "metrica": "valor_total_dotacao",
+        "observacao": "Valor de dotacoes associado as contratacoes; nao representa pagamento efetivo.",
+    }
+
+
+@app.get("/analytics/microempresas", tags=["indicadores"])
+def indicador_microempresas(
+    codigo_municipio: str | None = Query(default=None, max_length=20),
+    codigo_natureza: str | None = Query(default=None, min_length=2, max_length=2),
+    data_inicio: date | None = None,
+    data_fim: date | None = None,
+) -> dict[str, Any]:
+    """Consolida empresas ME vencedoras e suas participações registradas."""
+    _validar_periodo(data_inicio, data_fim)
+    _validar_codigo_natureza(codigo_natureza)
+    filtros, valores = _filtros_data("p", data_inicio, data_fim)
+    if codigo_municipio:
+        filtros.append("p.codigo_municipio = %s")
+        valores.append(codigo_municipio)
+    if codigo_natureza:
+        filtros.append(
+            """
+            EXISTS (
+                SELECT 1
+                FROM compra_livre.fato_dotacao_licitacao d
+                WHERE d.codigo_municipio = p.codigo_municipio
+                  AND d.numero_licitacao = p.numero_licitacao
+                  AND d.codigo_natureza = %s
+            )
+            """
+        )
+        valores.append(codigo_natureza)
+    filtros.append(_porte_microempresa_sql("e"))
+    where = f"WHERE {' AND '.join(filtros)}"
+    rows = _linhas(
+        f"""
+        SELECT COUNT(DISTINCT p.cnpj) AS quantidade_microempresas,
+               COUNT(DISTINCT (p.codigo_municipio, p.numero_licitacao))
+                   AS quantidade_licitacoes,
+               COUNT(*) AS quantidade_participacoes,
+               COALESCE(SUM(p.valor_total_vencido), 0) AS valor_total_vencido,
+               COALESCE(SUM(p.quantidade_itens_vencidos), 0)
+                   AS quantidade_itens_vencidos
+        FROM compra_livre.fato_participacao_empresa p
+        JOIN compra_livre.dim_empresa e ON e.cnpj = p.cnpj
+        {where}
+        """,
+        tuple(valores),
+    )
+    return {"data": rows[0], "porte_considerado": ["ME", "Microempresa", "Microempresa (ME)"]}
+
+
+@app.get("/analytics/participacao-me-por-natureza", tags=["indicadores"])
+def participacao_me_por_natureza(
+    codigo_municipio: str | None = Query(default=None, max_length=20),
+    data_inicio: date | None = None,
+    data_fim: date | None = None,
+) -> dict[str, Any]:
+    """Calcula a presença de ME por natureza no nível da licitação.
+
+    Uma licitação com várias naturezas aparece em cada natureza relacionada;
+    os valores não são repartidos entre itens porque o TCE não fornece essa
+    ligação diretamente nesta base.
+    """
+    _validar_periodo(data_inicio, data_fim)
+    dotacao_filtros, dotacao_valores = _filtros_data("d", data_inicio, data_fim)
+    if codigo_municipio:
+        dotacao_filtros.append("d.codigo_municipio = %s")
+        dotacao_valores.append(codigo_municipio)
+    dotacao_where = (
+        f"WHERE {' AND '.join(dotacao_filtros)}" if dotacao_filtros else ""
+    )
+    participacao_filtros, participacao_valores = _filtros_data(
+        "p", data_inicio, data_fim
+    )
+    if codigo_municipio:
+        participacao_filtros.append("p.codigo_municipio = %s")
+        participacao_valores.append(codigo_municipio)
+    participacao_where = (
+        f"WHERE {' AND '.join(participacao_filtros)}"
+        if participacao_filtros
+        else ""
+    )
+    rows = _linhas(
+        f"""
+        WITH licitacoes_naturezas AS (
+            SELECT DISTINCT d.codigo_municipio, d.numero_licitacao,
+                            d.codigo_natureza
+            FROM compra_livre.fato_dotacao_licitacao d
+            {dotacao_where}
+              {"AND" if dotacao_where else "WHERE"} d.codigo_natureza IS NOT NULL
+        ),
+        participacoes AS (
+            SELECT p.codigo_municipio, p.numero_licitacao,
+                   COUNT(*) AS quantidade_participacoes,
+                   COUNT(*) FILTER (WHERE {_porte_microempresa_sql("e")})
+                       AS participacoes_me,
+                   SUM(p.valor_total_vencido) AS valor_vencido,
+                   SUM(p.valor_total_vencido) FILTER (
+                       WHERE {_porte_microempresa_sql("e")}
+                   ) AS valor_vencido_me,
+                   SUM(p.quantidade_itens_vencidos) AS itens_vencidos,
+                   SUM(p.quantidade_itens_vencidos) FILTER (
+                       WHERE {_porte_microempresa_sql("e")}
+                   ) AS itens_vencidos_me
+            FROM compra_livre.fato_participacao_empresa p
+            JOIN compra_livre.dim_empresa e ON e.cnpj = p.cnpj
+            {participacao_where}
+            GROUP BY p.codigo_municipio, p.numero_licitacao
+        ),
+        agregados AS (
+            SELECT ln.codigo_natureza,
+                   COUNT(*) AS quantidade_licitacoes,
+                   COUNT(*) FILTER (WHERE p.participacoes_me > 0)
+                       AS licitacoes_com_me,
+                   COALESCE(SUM(p.quantidade_participacoes), 0)
+                       AS quantidade_participacoes,
+                   COALESCE(SUM(p.participacoes_me), 0) AS participacoes_me,
+                   COALESCE(SUM(p.valor_vencido), 0) AS valor_vencido,
+                   COALESCE(SUM(p.valor_vencido_me), 0) AS valor_vencido_me,
+                   COALESCE(SUM(p.itens_vencidos), 0) AS itens_vencidos,
+                   COALESCE(SUM(p.itens_vencidos_me), 0) AS itens_vencidos_me
+            FROM licitacoes_naturezas ln
+            LEFT JOIN participacoes p
+              ON p.codigo_municipio = ln.codigo_municipio
+             AND p.numero_licitacao = ln.numero_licitacao
+            GROUP BY ln.codigo_natureza
+        )
+        SELECT a.codigo_natureza, n.nome_natureza,
+               a.quantidade_licitacoes, a.licitacoes_com_me,
+               ROUND(100.0 * a.licitacoes_com_me
+                   / NULLIF(a.quantidade_licitacoes, 0), 2)
+                   AS percentual_licitacoes_com_me,
+               a.quantidade_participacoes, a.participacoes_me,
+               ROUND(100.0 * a.participacoes_me
+                   / NULLIF(a.quantidade_participacoes, 0), 2)
+                   AS percentual_participacoes_me,
+               a.valor_vencido, a.valor_vencido_me,
+               ROUND(100.0 * a.valor_vencido_me
+                   / NULLIF(a.valor_vencido, 0), 2)
+                   AS percentual_valor_vencido_me,
+               a.itens_vencidos, a.itens_vencidos_me,
+               ROUND(100.0 * a.itens_vencidos_me
+                   / NULLIF(a.itens_vencidos, 0), 2)
+                   AS percentual_itens_vencidos_me
+        FROM agregados a
+        JOIN compra_livre.dim_natureza_despesa n
+          ON n.codigo_natureza = a.codigo_natureza
+        ORDER BY a.codigo_natureza
+        """,
+        tuple(
+        dotacao_valores
+        + participacao_valores
+        ),
+    )
+    return {
+        "data": rows,
+        "associacao": "licitacao",
+        "observacao": "Quando uma licitacao possui varias naturezas, ela e contabilizada em cada natureza relacionada.",
+    }
