@@ -285,7 +285,9 @@ Indicadores analíticos:
   `codigo_municipio`, `codigo_natureza` e `ano` como filtros.
 - `/analytics/participacoes-me-locais` exige `codigo_municipio` e retorna
   microempresas vencedoras cujo município cadastral coincide com o município
-  consultado. O endereço fica nulo quando não foi preservado no staging.
+  consultado. Além da lista, `resumo` retorna os percentuais de licitações,
+  participações, valor vencido e itens vencidos de ME locais sobre os totais
+  do município. O endereço fica nulo quando não foi preservado no staging.
 
 ## Limitações conhecidas
 

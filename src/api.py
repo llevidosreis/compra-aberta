@@ -229,8 +229,24 @@ class ParticipacaoMeLocal(BaseModel):
     quantidade_itens_vencidos: int
 
 
+class ParticipacoesMeLocaisResumo(BaseModel):
+    total_licitacoes: int
+    licitacoes_com_me_local: int
+    percentual_licitacoes_com_me_local: float | None = None
+    total_participacoes: int
+    participacoes_me_locais: int
+    percentual_participacoes_me_locais: float | None = None
+    valor_total_vencido: str
+    valor_vencido_me_local: str
+    percentual_valor_vencido_me_local: float | None = None
+    itens_vencidos: int
+    itens_vencidos_me_locais: int
+    percentual_itens_vencidos_me_locais: float | None = None
+
+
 class ParticipacoesMeLocaisResponse(Paginacao):
     data: list[ParticipacaoMeLocal]
+    resumo: ParticipacoesMeLocaisResumo
 
 
 def _serializar(valor: Any) -> Any:
@@ -622,9 +638,13 @@ def participacoes_me_locais(
     """Retorna ME vencedoras cujo município cadastral é o consultado."""
     filtros = ["p.codigo_municipio = %s", _porte_microempresa_sql("e")]
     valores: list[Any] = [codigo_municipio]
+    resumo_filtros = ["p.codigo_municipio = %s"]
+    resumo_valores: list[Any] = [codigo_municipio]
     if ano:
         filtros.append("EXTRACT(YEAR FROM p.data_realizacao_licitacao) = %s")
         valores.append(ano)
+        resumo_filtros.append("EXTRACT(YEAR FROM p.data_realizacao_licitacao) = %s")
+        resumo_valores.append(ano)
     valores.extend([limit, offset])
     rows = _linhas(
         f"""
@@ -654,7 +674,48 @@ def participacoes_me_locais(
         """,
         tuple(valores),
     )
-    return {"data": rows, "limit": limit, "offset": offset}
+    resumo_rows = _linhas(
+        f"""
+        SELECT
+            COUNT(DISTINCT (p.codigo_municipio, p.numero_licitacao))
+                AS total_licitacoes,
+            COUNT(DISTINCT (p.codigo_municipio, p.numero_licitacao))
+                FILTER (WHERE {_porte_microempresa_sql("e")}
+                    AND LOWER(TRIM(e.municipio_empresa)) = LOWER(TRIM(m.nome)))
+                AS licitacoes_com_me_local,
+            COUNT(*) AS total_participacoes,
+            COUNT(*) FILTER (
+                WHERE {_porte_microempresa_sql("e")}
+                  AND LOWER(TRIM(e.municipio_empresa)) = LOWER(TRIM(m.nome))
+            ) AS participacoes_me_locais,
+            COALESCE(SUM(p.valor_total_vencido), 0) AS valor_total_vencido,
+            COALESCE(SUM(p.valor_total_vencido) FILTER (
+                WHERE {_porte_microempresa_sql("e")}
+                  AND LOWER(TRIM(e.municipio_empresa)) = LOWER(TRIM(m.nome))
+            ), 0) AS valor_vencido_me_local,
+            COALESCE(SUM(p.quantidade_itens_vencidos), 0) AS itens_vencidos,
+            COALESCE(SUM(p.quantidade_itens_vencidos) FILTER (
+                WHERE {_porte_microempresa_sql("e")}
+                  AND LOWER(TRIM(e.municipio_empresa)) = LOWER(TRIM(m.nome))
+            ), 0) AS itens_vencidos_me_locais
+        FROM compra_livre.fato_participacao_empresa p
+        JOIN compra_livre.dim_municipio m
+          ON m.codigo_municipio = p.codigo_municipio
+        JOIN compra_livre.dim_empresa e ON e.cnpj = p.cnpj
+        WHERE {' AND '.join(resumo_filtros)}
+        """,
+        tuple(resumo_valores),
+    )
+    resumo = resumo_rows[0]
+    for total, numerator, percentage in (
+        ("total_licitacoes", "licitacoes_com_me_local", "percentual_licitacoes_com_me_local"),
+        ("total_participacoes", "participacoes_me_locais", "percentual_participacoes_me_locais"),
+        ("valor_total_vencido", "valor_vencido_me_local", "percentual_valor_vencido_me_local"),
+        ("itens_vencidos", "itens_vencidos_me_locais", "percentual_itens_vencidos_me_locais"),
+    ):
+        total_value = float(resumo[total])
+        resumo[percentage] = round(float(resumo[numerator]) / total_value * 100, 2) if total_value else None
+    return {"data": rows, "resumo": resumo, "limit": limit, "offset": offset}
 
 
 @app.get(
