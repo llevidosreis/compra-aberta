@@ -194,6 +194,45 @@ class ParticipacaoMePorNaturezaResponse(BaseModel):
     observacao: str
 
 
+class LicitacaoDetalhada(BaseModel):
+    codigo_municipio: str
+    municipio: str
+    numero_licitacao: str
+    ano_licitacao: int | None = None
+    valor_total_licitacao: str
+    codigo_natureza: str | None = None
+    nome_natureza: str | None = None
+    cnpj: str
+    empresa: str | None = None
+    porte_empresa: str | None = None
+    endereco: str | None = None
+    valor_total_vencido: str
+    quantidade_itens_vencidos: int
+
+
+class LicitacoesDetalhadasResponse(Paginacao):
+    data: list[LicitacaoDetalhada]
+
+
+class ParticipacaoMeLocal(BaseModel):
+    codigo_municipio: str
+    municipio_consultado: str
+    numero_licitacao: str
+    data_realizacao_licitacao: str | None = None
+    cnpj: str
+    empresa: str | None = None
+    porte_empresa: str | None = None
+    municipio_empresa: str | None = None
+    uf_empresa: str | None = None
+    endereco: str | None = None
+    valor_total_vencido: str
+    quantidade_itens_vencidos: int
+
+
+class ParticipacoesMeLocaisResponse(Paginacao):
+    data: list[ParticipacaoMeLocal]
+
+
 def _serializar(valor: Any) -> Any:
     if isinstance(valor, (date,)):
         return valor.isoformat()
@@ -480,6 +519,137 @@ def empresas(
         FROM compra_livre.dim_empresa
         {where}
         ORDER BY razao_social NULLS LAST, cnpj
+        LIMIT %s OFFSET %s
+        """,
+        tuple(valores),
+    )
+    return {"data": rows, "limit": limit, "offset": offset}
+
+
+@app.get(
+    "/analytics/licitacoes-detalhadas",
+    response_model=LicitacoesDetalhadasResponse,
+    tags=["indicadores"],
+)
+def licitacoes_detalhadas(
+    codigo_municipio: str | None = Query(default=None, max_length=20),
+    codigo_natureza: str | None = Query(default=None, min_length=2, max_length=2),
+    ano: int | None = Query(default=None, ge=2000, le=2100),
+    limit: int = Query(default=100, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+) -> dict[str, Any]:
+    """Retorna licitação, natureza e empresa vencedora na mesma linha."""
+    _validar_codigo_natureza(codigo_natureza)
+    filtros: list[str] = []
+    valores: list[Any] = []
+    if codigo_municipio:
+        filtros.append("f.codigo_municipio = %s")
+        valores.append(codigo_municipio)
+    if codigo_natureza:
+        filtros.append("n.codigo_natureza = %s")
+        valores.append(codigo_natureza)
+    if ano:
+        filtros.append("EXTRACT(YEAR FROM f.data_realizacao_licitacao) = %s")
+        valores.append(ano)
+    where = f"WHERE {' AND '.join(filtros)}" if filtros else ""
+    valores.extend([limit, offset])
+    rows = _linhas(
+        f"""
+        WITH naturezas AS (
+            SELECT codigo_municipio, numero_licitacao,
+                   d.codigo_natureza, MAX(n.nome_natureza) AS nome_natureza
+            FROM compra_livre.fato_dotacao_licitacao d
+            LEFT JOIN compra_livre.dim_natureza_despesa n
+              ON n.codigo_natureza = d.codigo_natureza
+            GROUP BY d.codigo_municipio, d.numero_licitacao, d.codigo_natureza
+        ),
+        participacoes AS (
+            SELECT p.codigo_municipio, p.numero_licitacao, p.cnpj,
+                   p.valor_total_vencido, p.quantidade_itens_vencidos,
+                   e.razao_social, e.porte_empresa,
+                   e.municipio_empresa, e.uf_empresa
+            FROM compra_livre.fato_participacao_empresa p
+            JOIN compra_livre.dim_empresa e ON e.cnpj = p.cnpj
+        )
+        SELECT f.codigo_municipio, m.nome AS municipio,
+               f.numero_licitacao,
+               EXTRACT(YEAR FROM f.data_realizacao_licitacao)::INTEGER
+                   AS ano_licitacao,
+               f.valor_total_licitacao,
+               n.codigo_natureza, n.nome_natureza,
+               p.cnpj, p.razao_social AS empresa, p.porte_empresa,
+               COALESCE(sl.endereco_negociante, NULL) AS endereco,
+               p.valor_total_vencido, p.quantidade_itens_vencidos
+        FROM compra_livre.fato_licitacao f
+        JOIN compra_livre.dim_municipio m
+          ON m.codigo_municipio = f.codigo_municipio
+        JOIN naturezas n
+          ON n.codigo_municipio = f.codigo_municipio
+         AND n.numero_licitacao = f.numero_licitacao
+        JOIN participacoes p
+          ON p.codigo_municipio = f.codigo_municipio
+         AND p.numero_licitacao = f.numero_licitacao
+        LEFT JOIN LATERAL (
+            SELECT s.endereco_negociante
+            FROM compra_livre.stg_licitante s
+            WHERE s.codigo_municipio = p.codigo_municipio
+              AND s.numero_licitacao = p.numero_licitacao
+              AND s.numero_documento_negociante = p.cnpj
+            ORDER BY s.id DESC
+            LIMIT 1
+        ) sl ON TRUE
+        {where}
+        ORDER BY f.data_realizacao_licitacao DESC NULLS LAST,
+                 f.codigo_municipio, f.numero_licitacao, n.codigo_natureza
+        LIMIT %s OFFSET %s
+        """,
+        tuple(valores),
+    )
+    return {"data": rows, "limit": limit, "offset": offset}
+
+
+@app.get(
+    "/analytics/participacoes-me-locais",
+    response_model=ParticipacoesMeLocaisResponse,
+    tags=["indicadores"],
+)
+def participacoes_me_locais(
+    codigo_municipio: str = Query(..., min_length=1, max_length=20),
+    ano: int | None = Query(default=None, ge=2000, le=2100),
+    limit: int = Query(default=100, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+) -> dict[str, Any]:
+    """Retorna ME vencedoras cujo município cadastral é o consultado."""
+    filtros = ["p.codigo_municipio = %s", _porte_microempresa_sql("e")]
+    valores: list[Any] = [codigo_municipio]
+    if ano:
+        filtros.append("EXTRACT(YEAR FROM p.data_realizacao_licitacao) = %s")
+        valores.append(ano)
+    valores.extend([limit, offset])
+    rows = _linhas(
+        f"""
+        SELECT p.codigo_municipio, m.nome AS municipio_consultado,
+               p.numero_licitacao, p.data_realizacao_licitacao,
+               p.cnpj, e.razao_social AS empresa, e.porte_empresa,
+               e.municipio_empresa, e.uf_empresa,
+               COALESCE(sl.endereco_negociante, NULL) AS endereco,
+               p.valor_total_vencido, p.quantidade_itens_vencidos
+        FROM compra_livre.fato_participacao_empresa p
+        JOIN compra_livre.dim_municipio m
+          ON m.codigo_municipio = p.codigo_municipio
+        JOIN compra_livre.dim_empresa e ON e.cnpj = p.cnpj
+        LEFT JOIN LATERAL (
+            SELECT s.endereco_negociante
+            FROM compra_livre.stg_licitante s
+            WHERE s.codigo_municipio = p.codigo_municipio
+              AND s.numero_licitacao = p.numero_licitacao
+              AND s.numero_documento_negociante = p.cnpj
+            ORDER BY s.id DESC
+            LIMIT 1
+        ) sl ON TRUE
+        WHERE {' AND '.join(filtros)}
+          AND LOWER(TRIM(e.municipio_empresa)) = LOWER(TRIM(m.nome))
+        ORDER BY p.data_realizacao_licitacao DESC NULLS LAST, p.id DESC
         LIMIT %s OFFSET %s
         """,
         tuple(valores),

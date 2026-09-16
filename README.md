@@ -253,6 +253,8 @@ GET /empresas
 GET /analytics/gastos-por-natureza
 GET /analytics/microempresas
 GET /analytics/participacao-me-por-natureza
+GET /analytics/licitacoes-detalhadas
+GET /analytics/participacoes-me-locais
 ```
 
 O endpoint `GET /licitacoes` aceita `codigo_natureza` para filtrar
@@ -278,6 +280,12 @@ Indicadores analíticos:
   microempresas. Como o TCE não relaciona diretamente cada item à natureza,
   a associação é feita no nível da licitação; uma licitação com várias
   naturezas aparece em cada natureza relacionada.
+- `/analytics/licitacoes-detalhadas` combina licitação, valor, ano, natureza,
+  empresa vencedora, porte, CNPJ e endereço disponível no staging. Use
+  `codigo_municipio`, `codigo_natureza` e `ano` como filtros.
+- `/analytics/participacoes-me-locais` exige `codigo_municipio` e retorna
+  microempresas vencedoras cujo município cadastral coincide com o município
+  consultado. O endereço fica nulo quando não foi preservado no staging.
 
 ## Limitações conhecidas
 
