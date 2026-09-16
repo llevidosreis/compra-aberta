@@ -507,3 +507,8 @@ def participacao_me_por_natureza(
         "associacao": "licitacao",
         "observacao": "Quando uma licitacao possui varias naturezas, ela e contabilizada em cada natureza relacionada.",
     }
+
+
+@app.get("/")
+def read_root():
+    return {"message": "API Compra Aberta está no ar! Acesse /docs para a documentação."}
