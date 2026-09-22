@@ -249,6 +249,26 @@ class ParticipacoesMeLocaisResponse(Paginacao):
     resumo: ParticipacoesMeLocaisResumo
 
 
+class ParticipacoesMeGeraisResumo(BaseModel):
+    total_licitacoes: int
+    licitacoes_com_me: int
+    percentual_licitacoes_com_me: float | None = None
+    total_participacoes: int
+    participacoes_me: int
+    percentual_participacoes_me: float | None = None
+    valor_total_vencido: str
+    valor_vencido_me: str
+    percentual_valor_vencido_me: float | None = None
+    itens_vencidos: int
+    itens_vencidos_me: int
+    percentual_itens_vencidos_me: float | None = None
+
+
+class ParticipacoesMeGeraisResponse(Paginacao):
+    data: list[ParticipacaoMeLocal]
+    resumo: ParticipacoesMeGeraisResumo
+
+
 def _serializar(valor: Any) -> Any:
     if isinstance(valor, (date,)):
         return valor.isoformat()
@@ -631,15 +651,31 @@ def licitacoes_detalhadas(
 )
 def participacoes_me_locais(
     codigo_municipio: str = Query(..., min_length=1, max_length=20),
+    codigo_natureza: str | None = Query(default=None, min_length=2, max_length=2),
     ano: int | None = Query(default=None, ge=2000, le=2100),
     limit: int = Query(default=100, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
 ) -> dict[str, Any]:
     """Retorna ME vencedoras cujo município cadastral é o consultado."""
+    _validar_codigo_natureza(codigo_natureza)
     filtros = ["p.codigo_municipio = %s", _porte_microempresa_sql("e")]
     valores: list[Any] = [codigo_municipio]
     resumo_filtros = ["p.codigo_municipio = %s"]
     resumo_valores: list[Any] = [codigo_municipio]
+    if codigo_natureza:
+        natureza_filtro = """
+            EXISTS (
+                SELECT 1
+                FROM compra_livre.fato_dotacao_licitacao d
+                WHERE d.codigo_municipio = p.codigo_municipio
+                  AND d.numero_licitacao = p.numero_licitacao
+                  AND d.codigo_natureza = %s
+            )
+        """
+        filtros.append(natureza_filtro)
+        valores.append(codigo_natureza)
+        resumo_filtros.append(natureza_filtro)
+        resumo_valores.append(codigo_natureza)
     if ano:
         filtros.append("EXTRACT(YEAR FROM p.data_realizacao_licitacao) = %s")
         valores.append(ano)
@@ -715,6 +751,114 @@ def participacoes_me_locais(
     ):
         total_value = float(resumo[total])
         resumo[percentage] = round(float(resumo[numerator]) / total_value * 100, 2) if total_value else None
+    return {"data": rows, "resumo": resumo, "limit": limit, "offset": offset}
+
+
+@app.get(
+    "/analytics/participacoes-me-gerais",
+    response_model=ParticipacoesMeGeraisResponse,
+    tags=["indicadores"],
+)
+def participacoes_me_gerais(
+    codigo_municipio: str = Query(..., min_length=1, max_length=20),
+    codigo_natureza: str | None = Query(default=None, min_length=2, max_length=2),
+    ano: int | None = Query(default=None, ge=2000, le=2100),
+    limit: int = Query(default=100, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+) -> dict[str, Any]:
+    """Retorna todas as ME vencedoras em licitações do município consultado."""
+    _validar_codigo_natureza(codigo_natureza)
+    filtros = ["p.codigo_municipio = %s", _porte_microempresa_sql("e")]
+    valores: list[Any] = [codigo_municipio]
+    resumo_filtros = ["p.codigo_municipio = %s"]
+    resumo_valores: list[Any] = [codigo_municipio]
+    if codigo_natureza:
+        natureza_filtro = """
+            EXISTS (
+                SELECT 1
+                FROM compra_livre.fato_dotacao_licitacao d
+                WHERE d.codigo_municipio = p.codigo_municipio
+                  AND d.numero_licitacao = p.numero_licitacao
+                  AND d.codigo_natureza = %s
+            )
+        """
+        filtros.append(natureza_filtro)
+        valores.append(codigo_natureza)
+        resumo_filtros.append(natureza_filtro)
+        resumo_valores.append(codigo_natureza)
+    if ano:
+        ano_filtro = "EXTRACT(YEAR FROM p.data_realizacao_licitacao) = %s"
+        filtros.append(ano_filtro)
+        valores.append(ano)
+        resumo_filtros.append(ano_filtro)
+        resumo_valores.append(ano)
+    valores.extend([limit, offset])
+    rows = _linhas(
+        f"""
+        SELECT p.codigo_municipio, m.nome AS municipio_consultado,
+               p.numero_licitacao, p.data_realizacao_licitacao,
+               p.cnpj, e.razao_social AS empresa, e.porte_empresa,
+               e.municipio_empresa, e.uf_empresa,
+               COALESCE(sl.endereco_negociante, NULL) AS endereco,
+               p.valor_total_vencido, p.quantidade_itens_vencidos
+        FROM compra_livre.fato_participacao_empresa p
+        JOIN compra_livre.dim_municipio m
+          ON m.codigo_municipio = p.codigo_municipio
+        JOIN compra_livre.dim_empresa e ON e.cnpj = p.cnpj
+        LEFT JOIN LATERAL (
+            SELECT s.endereco_negociante
+            FROM compra_livre.stg_licitante s
+            WHERE s.codigo_municipio = p.codigo_municipio
+              AND s.numero_licitacao = p.numero_licitacao
+              AND s.numero_documento_negociante = p.cnpj
+            ORDER BY s.id DESC
+            LIMIT 1
+        ) sl ON TRUE
+        WHERE {' AND '.join(filtros)}
+        ORDER BY p.data_realizacao_licitacao DESC NULLS LAST, p.id DESC
+        LIMIT %s OFFSET %s
+        """,
+        tuple(valores),
+    )
+    resumo_rows = _linhas(
+        f"""
+        SELECT
+            COUNT(DISTINCT (p.codigo_municipio, p.numero_licitacao))
+                AS total_licitacoes,
+            COUNT(DISTINCT (p.codigo_municipio, p.numero_licitacao))
+                FILTER (WHERE {_porte_microempresa_sql("e")}) AS licitacoes_com_me,
+            COUNT(*) AS total_participacoes,
+            COUNT(*) FILTER (WHERE {_porte_microempresa_sql("e")})
+                AS participacoes_me,
+            COALESCE(SUM(p.valor_total_vencido), 0) AS valor_total_vencido,
+            COALESCE(SUM(p.valor_total_vencido) FILTER (
+                WHERE {_porte_microempresa_sql("e")}
+            ), 0) AS valor_vencido_me,
+            COALESCE(SUM(p.quantidade_itens_vencidos), 0) AS itens_vencidos,
+            COALESCE(SUM(p.quantidade_itens_vencidos) FILTER (
+                WHERE {_porte_microempresa_sql("e")}
+            ), 0) AS itens_vencidos_me
+        FROM compra_livre.fato_participacao_empresa p
+        JOIN compra_livre.dim_municipio m
+          ON m.codigo_municipio = p.codigo_municipio
+        JOIN compra_livre.dim_empresa e ON e.cnpj = p.cnpj
+        WHERE {' AND '.join(resumo_filtros)}
+        """,
+        tuple(resumo_valores),
+    )
+    resumo = resumo_rows[0]
+    for total, numerator, percentage in (
+        ("total_licitacoes", "licitacoes_com_me", "percentual_licitacoes_com_me"),
+        ("total_participacoes", "participacoes_me", "percentual_participacoes_me"),
+        ("valor_total_vencido", "valor_vencido_me", "percentual_valor_vencido_me"),
+        ("itens_vencidos", "itens_vencidos_me", "percentual_itens_vencidos_me"),
+    ):
+        total_value = float(resumo[total])
+        resumo[percentage] = (
+            round(float(resumo[numerator]) / total_value * 100, 2)
+            if total_value
+            else None
+        )
     return {"data": rows, "resumo": resumo, "limit": limit, "offset": offset}
 
 

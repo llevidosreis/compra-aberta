@@ -255,6 +255,7 @@ GET /analytics/microempresas
 GET /analytics/participacao-me-por-natureza
 GET /analytics/licitacoes-detalhadas
 GET /analytics/participacoes-me-locais
+GET /analytics/participacoes-me-gerais
 ```
 
 O endpoint `GET /licitacoes` aceita `codigo_natureza` para filtrar
@@ -287,7 +288,13 @@ Indicadores analíticos:
   microempresas vencedoras cujo município cadastral coincide com o município
   consultado. Além da lista, `resumo` retorna os percentuais de licitações,
   participações, valor vencido e itens vencidos de ME locais sobre os totais
-  do município. O endereço fica nulo quando não foi preservado no staging.
+  do município. Aceita `codigo_natureza` para restringir a análise às
+  licitações daquela natureza. O endereço fica nulo quando não foi preservado
+  no staging.
+- `/analytics/participacoes-me-gerais` retorna todas as microempresas
+  vencedoras em licitações do município, incluindo empresas de outros
+  municípios, com os mesmos percentuais sobre o total filtrado. Aceita
+  `codigo_natureza` e `ano`.
 
 ## Limitações conhecidas
 
