@@ -10,7 +10,7 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-from src.config import carregar_config
+from src.config import carregar_config_banco
 from src.db import conexao
 
 app = FastAPI(
@@ -319,7 +319,7 @@ def _serializar(valor: Any) -> Any:
 
 
 def _linhas(sql: str, parametros: tuple[Any, ...]) -> list[dict[str, Any]]:
-    config = carregar_config()
+    config = carregar_config_banco()
     with conexao(config) as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cursor:
             cursor.execute(sql, parametros)

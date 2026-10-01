@@ -6,7 +6,7 @@ A API devolve tudo como string (mesmo campos numéricos), então aqui
 convertemos para os tipos reais e tratamos os poucos casos de valor
 ausente/vazio que aparecem na prática.
 """
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 import re
 import unicodedata
 from typing import Any

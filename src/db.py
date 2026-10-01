@@ -13,11 +13,11 @@ from collections.abc import Iterator
 import psycopg2
 import psycopg2.extras
 
-from src.config import Config
+from src.config import Config, ConfigBanco
 
 
 @contextmanager
-def conexao(config: Config) -> Iterator[psycopg2.extensions.connection]:
+def conexao(config: Config | ConfigBanco) -> Iterator[psycopg2.extensions.connection]:
     """Abre uma conexão, garante commit no sucesso e rollback no erro."""
     conn = psycopg2.connect(config.database_url, client_encoding="UTF8")
     try:

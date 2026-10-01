@@ -16,6 +16,16 @@ class PNCPClient:
 
     def __init__(self, config: Config):
         self._config = config
+        self._ultima_requisicao_em: float | None = None
+
+    def _respeitar_intervalo(self) -> None:
+        """Evita rajadas de chamadas que o endpoint de detalhe do PNCP bloqueia."""
+        intervalo = self._config.pncp_intervalo_requisicoes_segundos
+        if self._ultima_requisicao_em is not None and intervalo:
+            espera = intervalo - (time.monotonic() - self._ultima_requisicao_em)
+            if espera > 0:
+                time.sleep(espera)
+        self._ultima_requisicao_em = time.monotonic()
 
     def _paginar(
         self,
@@ -52,6 +62,7 @@ class PNCPClient:
         ultimo_erro: Exception | None = None
         for tentativa in range(1, self.MAX_TENTATIVAS + 1):
             try:
+                self._respeitar_intervalo()
                 resposta = requests.get(
                     url, params=params, timeout=self._config.http_timeout_segundos
                 )
@@ -80,6 +91,8 @@ class PNCPClient:
                         retry_after = erro.response.headers.get("Retry-After")
                         if retry_after and retry_after.isdigit():
                             espera = int(retry_after)
+                        else:
+                            espera = self._config.pncp_espera_429_segundos
                     time.sleep(espera)
 
         raise PNCPClienteError(

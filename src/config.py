@@ -39,6 +39,24 @@ class Config:
     http_timeout_segundos: int
     opencnpj_dias_validade_cache: int
     opencnpj_max_workers: int
+    pncp_base_url: str = "https://pncp.gov.br/api/consulta/v1"
+    pncp_page_size: int = 50
+    pncp_modalidades: tuple[int, ...] = (8, 9)
+    pncp_limiar_match: float = 0.35
+    pncp_intervalo_requisicoes_segundos: float = 1.0
+    pncp_espera_429_segundos: int = 30
+
+
+@dataclass(frozen=True)
+class ConfigBanco:
+    """Configuração mínima necessária para atender a API de leitura."""
+
+    database_url: str
+
+
+def carregar_config_banco() -> ConfigBanco:
+    """Carrega apenas a dependência da API, sem validar opções do pipeline."""
+    return ConfigBanco(database_url=_obrigatoria("DATABASE_URL"))
 
 
 def carregar_config() -> Config:
@@ -66,4 +84,10 @@ def carregar_config() -> Config:
             if codigo.strip()
         ),
         pncp_limiar_match=float(os.getenv("PNCP_LIMIAR_MATCH", "0.35")),
+        pncp_intervalo_requisicoes_segundos=max(
+            0.0, float(os.getenv("PNCP_INTERVALO_REQUISICOES_SEGUNDOS", "1"))
+        ),
+        pncp_espera_429_segundos=max(
+            1, int(os.getenv("PNCP_ESPERA_429_SEGUNDOS", "30"))
+        ),
      )

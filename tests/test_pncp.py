@@ -29,6 +29,7 @@ def _config_teste(**alteracoes):
         "opencnpj_max_workers": 5,
         "pncp_page_size": 2,
         "pncp_modalidades": (8, 9),
+        "pncp_intervalo_requisicoes_segundos": 0,
     }
     valores.update(alteracoes)
     return Config(**valores)
@@ -92,6 +93,22 @@ def test_pncp_retrata_status_transitorio(mock_get, _sleep, status):
     )) == []
     assert mock_get.call_count == 2
     _sleep.assert_called_once()
+
+
+@patch("src.clients.pncp_client.time.sleep")
+@patch("src.clients.pncp_client.requests.get")
+def test_pncp_429_sem_retry_after_usa_espera_configurada(mock_get, sleep):
+    resposta_erro = MagicMock(status_code=429)
+    resposta_erro.headers = {}
+    resposta_erro.raise_for_status.side_effect = requests.HTTPError(
+        response=resposta_erro
+    )
+    mock_get.side_effect = [resposta_erro, _pagina([], 0)]
+
+    assert list(PNCPClient(_config_teste()).listar_contratacoes_publicadas(
+        "2026-01-01", "2026-01-31", 8, "CE"
+    )) == []
+    sleep.assert_called_once_with(30)
 
 
 @patch("src.clients.pncp_client.requests.get")
