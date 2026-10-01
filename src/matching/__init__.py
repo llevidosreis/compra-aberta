@@ -1,0 +1,1 @@
+"""Matching puro entre contratações PNCP e perfis de clientes."""
