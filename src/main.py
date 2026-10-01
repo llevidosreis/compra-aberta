@@ -9,7 +9,7 @@ import logging
 import sys
 
 from src.config import carregar_config
-from src.pipeline import dotacoes, full_load, incremental
+from src.pipeline import dotacoes, full_load, incremental, pncp
 
 
 def configurar_logging():
@@ -67,6 +67,17 @@ def main():
     parser_dotacoes.add_argument("--data-inicio", required=True, help="YYYY-MM-DD")
     parser_dotacoes.add_argument("--data-fim", required=True, help="YYYY-MM-DD")
 
+    parser_pncp_historico = subparsers.add_parser(
+        "pncp-historico", help="Carga histórica de contratações PNCP"
+    )
+    parser_pncp_historico.add_argument("--data-inicio", required=True, help="YYYY-MM-DD")
+    parser_pncp_historico.add_argument("--data-fim", required=True, help="YYYY-MM-DD")
+
+    parser_pncp_incremental = subparsers.add_parser(
+        "pncp-incremental", help="Carga incremental de contratações PNCP"
+    )
+    parser_pncp_incremental.add_argument("--dias", type=int, default=7, help="Janela retroativa em dias")
+
     args = parser.parse_args()
     config = carregar_config()
 
@@ -84,6 +95,11 @@ def main():
         )
     elif args.modo == "dotacoes":
         dotacoes.executar(config, args.data_inicio, args.data_fim)
+    elif args.modo == "pncp-historico":
+        pncp.executar_historico(config, args.data_inicio, args.data_fim)
+    elif args.modo == "pncp-incremental":
+        pncp.executar_incremental(config, args.dias)
+
 
 
 if __name__ == "__main__":

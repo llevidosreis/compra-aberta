@@ -37,6 +37,11 @@ OpenCNPJ (enriquecimento, com cache em dim_empresa)
         │
         ▼
 staging (Postgres) → fato_item_licitacao → fato_participacao_empresa → fato_licitacao
+
+PNCP /contratacoes/publicacao + /contratacoes/atualizacao + /contratacoes/proposta
+  │
+  ▼
+pncp_contratacao + pncp_item → perfil_cliente → pncp_match → API GET para o Full Stack
 ```
 
 A ordem de agregação segue literalmente a regra da documentação: quando o
@@ -54,6 +59,9 @@ justificativa completa da modelagem).
 | TCE-CE `sim/itens_compoem_bens_servicos` | itens e valores das licitações | sim, 1000/página |
 | TCE-CE `sim/dotacoes_utilizadas_contratacoes` | dotações e elementos de despesa associados às licitações | sim, 1000/página |
 | OpenCNPJ | porte, CNAEs, situação cadastral das empresas | não (uma consulta por CNPJ) |
+| PNCP `/contratacoes/publicacao` | contratações por publicação e modalidade | sim, total de páginas informado pela API |
+| PNCP `/contratacoes/atualizacao` | contratações alteradas na janela incremental | sim, total de páginas informado pela API |
+| PNCP `/contratacoes/proposta` | contratações recebendo propostas | sim, total de páginas informado pela API |
 
 ### Nota importante sobre `codigo_municipio`
 
@@ -74,8 +82,7 @@ Em todo o resto do banco (staging, fatos, `pipeline_execucoes`),
 `codigo_municipio` é sempre o código do TCE-CE, nunca o IBGE. O código IBGE
 fica guardado só como referência em `dim_municipio.codigo_ibge`.
 
-Um registro do `dv_municipios` (`codigo_municipio = "001"`, `nome_municipio
-= "T.C.M."`) tem `codigo_municipio_ibge = null` — não é um município real, é
+Um registro do `dv_municipios` (`codigo_municipio = "001"`, `nome_municipio = "T.C.M."`) tem `codigo_municipio_ibge = null` — não é um município real, é
 um código administrativo interno do TCE, e é descartado automaticamente por
 `TCEClient.listar_municipios()`.
 
@@ -141,6 +148,30 @@ carga de itens, participantes ou empresas:
 ```bash
 python -m src.main dotacoes --data-inicio 2025-01-01 --data-fim 2026-12-31
 ```
+**Histórico PNCP** (a UF vem de `UF_ALVO` e as modalidades de
+`PNCP_MODALIDADES`, separadas por vírgula):
+
+```bash
+python -m src.main pncp-historico --data-inicio 2026-01-01 --data-fim 2026-09-30
+```
+
+**Incremental PNCP** (edital com proposta aberta e alterações recentes):
+
+```bash
+python -m src.main pncp-incremental --dias 7
+```
+
+O `PNCP_PAGE_SIZE` é limitado ao intervalo oficial de 10 a 50. O padrão de
+`PNCP_MODALIDADES` é `8,9` (dispensa e inexigibilidade); ajuste-o ao escopo
+comercial. A retomada grava em `ultimo_start_index` a última página concluída,
+e recomeça pela seguinte.
+
+Na versão atual do Swagger de consulta PNCP, não aparece uma operação
+separada para itens nem o DTO de detalhe declara esse campo. O cliente usa a
+consulta de detalhe documentada e carrega itens quando vierem embutidos; sem
+uma operação oficial adicional, o matching continua usando o objeto da
+contratação. Os códigos padrão 8 e 9 são configuráveis, pois o Swagger não
+publica enumeração de modalidades.
 
 A carga grava uma linha por dotação em `fato_dotacao_licitacao`. Os sete
 códigos de natureza cadastrados ficam em `dim_natureza_despesa`; códigos de
@@ -214,6 +245,9 @@ As tabelas prontas para consumo são:
 - `fato_participacao_empresa`: uma linha por empresa por licitação, já com o valor somado — a mais indicada para as análises de ME/EPP.
 - `dim_empresa`: dados cadastrais e porte de cada empresa.
 - `dim_municipio`: nome e UF de cada município.
+- `pncp_contratacao` e `pncp_item`: editais e itens publicados no PNCP.
+- `perfil_cliente`: palavras-chave e área de atuação mantidas pelo backend.
+- `pncp_match`: compatibilidades novas ou recalculadas após atualização do edital.
 
 Todas ficam no schema `compra_livre` do Postgres do Supabase.
 
@@ -235,6 +269,12 @@ Documentação interativa:
 ```text
 http://localhost:8000/docs
 ```
+
+As rotas PNCP somente leitura são `GET /editais-pncp`,
+`GET /editais-pncp/{numero_controle_pncp}` (inclui itens),
+`GET /editais-pncp/matches?criado_desde=...` e
+`GET /empresas/{cnpj}/editais-compativeis`. O backend consumidor controla quais
+matches já notificou.
 
 Durante o desenvolvimento, CORS permite requisições GET de frontends em
 `localhost:3000` e `localhost:5173`. Em produção, altere essa lista para o

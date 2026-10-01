@@ -58,4 +58,12 @@ def carregar_config() -> Config:
         http_timeout_segundos=int(os.getenv("HTTP_TIMEOUT_SEGUNDOS", "30")),
         opencnpj_dias_validade_cache=int(os.getenv("OPENCNPJ_DIAS_VALIDADE_CACHE", "30")),
         opencnpj_max_workers=int(os.getenv("OPENCNPJ_MAX_WORKERS", "10")),
-    )
+        pncp_base_url=os.getenv("PNCP_BASE_URL", "https://pncp.gov.br/api/consulta/v1"),
+        pncp_page_size=min(50, max(10, int(os.getenv("PNCP_PAGE_SIZE", "50")))),
+        pncp_modalidades=tuple(
+            int(codigo.strip())
+            for codigo in os.getenv("PNCP_MODALIDADES", "8,9").split(",")
+            if codigo.strip()
+        ),
+        pncp_limiar_match=float(os.getenv("PNCP_LIMIAR_MATCH", "0.35")),
+     )

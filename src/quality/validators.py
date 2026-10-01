@@ -46,6 +46,32 @@ def validar_itens(registros: list[dict[str, Any]]) -> ResultadoValidacao:
             resultado.validos.append(registro)
     return resultado
 
+def validar_contratacoes_pncp(registros: list[dict[str, Any]]) -> ResultadoValidacao:
+    resultado = ResultadoValidacao()
+    for registro in registros:
+        motivo = None
+        if not registro.get("numero_controle_pncp"):
+            motivo = "numero_controle_pncp ausente"
+        elif len(registro.get("orgao_cnpj") or "") != 14:
+            motivo = "orgao_cnpj deve conter 14 dígitos"
+        elif not str(registro.get("objeto_compra") or "").strip():
+            motivo = "objeto_compra vazio"
+
+        if motivo:
+            resultado.invalidos.append((registro, motivo))
+        else:
+            resultado.validos.append(registro)
+    return resultado
+
+
+def validar_itens_pncp(registros: list[dict[str, Any]]) -> ResultadoValidacao:
+    resultado = ResultadoValidacao()
+    for registro in registros:
+        if registro.get("numero_item") in (None, ""):
+            resultado.invalidos.append((registro, "numero_item ausente"))
+        else:
+            resultado.validos.append(registro)
+    return resultado
 
 def _motivo_invalido_comum(registro: dict[str, Any]) -> str | None:
     if not registro.get("codigo_municipio"):

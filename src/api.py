@@ -14,7 +14,7 @@ from src.config import carregar_config
 from src.db import conexao
 
 app = FastAPI(
-    title="Compra Livre API",
+    title="Compra Aberta API",
     description="Dados analíticos de licitações públicas do Ceará.",
     version="1.0.0",
 )
@@ -142,6 +142,47 @@ class Empresa(BaseModel):
 
 class EmpresasResponse(Paginacao):
     data: list[Empresa]
+
+
+class EditalPNCP(BaseModel):
+    numero_compra: str | None = None
+    numero_controle_pncp: str
+    modalidade_nome: str | None = None
+    data_atualizacao: str | None = None
+    orgao_razao_social: str | None = None
+    nome_municipio: str | None = None
+    uf: str | None = None
+    objeto_compra: str
+    link_edital_pncp: str | None = None
+
+
+class ItemPNCP(BaseModel):
+    numero_item: str
+    descricao: str | None = None
+    quantidade: str | None = None
+    unidade: str | None = None
+    valor_estimado: str | None = None
+    codigo_catalogo: str | None = None
+    categoria_catalogo: str | None = None
+
+
+class EditaisPNCPResponse(Paginacao):
+    data: list[EditalPNCP]
+
+
+class EditalPNCPDetalhe(EditalPNCP):
+    itens: list[ItemPNCP]
+
+
+class MatchPNCP(EditalPNCP):
+    cnpj: str
+    score: str
+    motivos: dict[str, Any]
+    criado_em: str
+
+
+class MatchesPNCPResponse(Paginacao):
+    data: list[MatchPNCP]
 
 
 class GastoPorNatureza(BaseModel):
@@ -1072,3 +1113,132 @@ def participacao_me_por_natureza(
 @app.get("/")
 def read_root():
     return {"message": "API Compra Aberta está no ar! Acesse /docs para a documentação."}
+
+
+
+
+
+@app.get("/editais-pncp", response_model=EditaisPNCPResponse, tags=["PNCP"])
+def editais_pncp(
+    uf: str | None = Query(default=None, min_length=2, max_length=2),
+    codigo_municipio: str | None = Query(default=None, max_length=20),
+    modalidade: int | None = None,
+    somente_abertos: bool = False,
+    atualizado_desde: date | None = None,
+    data_inicio: date | None = None,
+    data_fim: date | None = None,
+    limit: int = Query(default=50, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+) -> dict[str, Any]:
+    """Lista contratações PNCP e filtra período pela última atualização disponível."""
+    _validar_periodo(data_inicio, data_fim)
+    filtros: list[str] = []
+    valores: list[Any] = []
+    for expressao, valor in (
+        ("uf = %s", uf.upper() if uf else None),
+        ("codigo_municipio = %s", codigo_municipio),
+        ("modalidade_codigo = %s", modalidade),
+    ):
+        if valor is not None:
+            filtros.append(expressao)
+            valores.append(valor)
+    if atualizado_desde:
+        filtros.append("data_atualizacao >= %s")
+        valores.append(atualizado_desde)
+    if data_inicio:
+        filtros.append("data_publicacao >= %s")
+        valores.append(data_inicio)
+    if data_fim:
+        filtros.append("data_publicacao < %s + INTERVAL '1 day'")
+        valores.append(data_fim)
+    if somente_abertos:
+        filtros.extend([
+            "data_abertura_proposta <= now()",
+            "data_encerramento_proposta > now()",
+        ])
+    where = f"WHERE {' AND '.join(filtros)}" if filtros else ""
+    valores.extend([limit, offset])
+    rows = _linhas(
+        f"""SELECT numero_controle_pncp, numero_compra, modalidade_nome,
+                   data_atualizacao, orgao_razao_social, nome_municipio, uf,
+                   objeto_compra, link_edital_pncp
+            FROM compra_livre.pncp_contratacao
+            {where}
+            ORDER BY data_atualizacao DESC NULLS LAST, numero_controle_pncp
+            LIMIT %s OFFSET %s""",
+        tuple(valores),
+    )
+    return {"data": rows, "limit": limit, "offset": offset}
+
+
+@app.get("/editais-pncp/matches", response_model=MatchesPNCPResponse, tags=["PNCP"])
+def matches_pncp(
+    criado_desde: date | None = None,
+    limit: int = Query(default=50, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+) -> dict[str, Any]:
+    filtros = ["m.criado_em >= %s"] if criado_desde else []
+    valores: list[Any] = [criado_desde] if criado_desde else []
+    where = f"WHERE {' AND '.join(filtros)}" if filtros else ""
+    valores.extend([limit, offset])
+    rows = _linhas(
+        f"""SELECT m.numero_controle_pncp, m.cnpj, m.score, m.motivos,
+                   m.criado_em, c.numero_compra, c.modalidade_nome,
+                   c.data_atualizacao, c.orgao_razao_social, c.nome_municipio,
+                   c.uf, c.objeto_compra, c.link_edital_pncp
+            FROM compra_livre.pncp_match m
+            JOIN compra_livre.pncp_contratacao c
+              ON c.numero_controle_pncp = m.numero_controle_pncp
+            {where}
+            ORDER BY m.criado_em, m.numero_controle_pncp, m.cnpj
+            LIMIT %s OFFSET %s""",
+        tuple(valores),
+    )
+    return {"data": rows, "limit": limit, "offset": offset}
+
+
+@app.get("/editais-pncp/{numero_controle_pncp}", response_model=EditalPNCPDetalhe, tags=["PNCP"])
+def detalhe_edital_pncp(numero_controle_pncp: str) -> dict[str, Any]:
+    rows = _linhas(
+        """SELECT numero_compra, numero_controle_pncp, modalidade_nome,
+                  data_atualizacao, orgao_razao_social, nome_municipio, uf,
+                  objeto_compra, link_edital_pncp
+           FROM compra_livre.pncp_contratacao
+           WHERE numero_controle_pncp = %s""",
+        (numero_controle_pncp,),
+    )
+    if not rows:
+        raise HTTPException(status_code=404, detail="Edital PNCP não encontrado")
+    itens = _linhas(
+        """SELECT numero_item, descricao, quantidade, unidade, valor_estimado,
+                  codigo_catalogo, categoria_catalogo
+           FROM compra_livre.pncp_item
+           WHERE numero_controle_pncp = %s
+           ORDER BY numero_item""",
+        (numero_controle_pncp,),
+    )
+    return {**rows[0], "itens": itens}
+
+
+@app.get("/empresas/{cnpj}/editais-compativeis", response_model=MatchesPNCPResponse, tags=["PNCP", "empresas"])
+def editais_compativeis_empresa(
+    cnpj: str,
+    limit: int = Query(default=50, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+) -> dict[str, Any]:
+    documento = "".join(ch for ch in cnpj if ch.isdigit())
+    if len(documento) != 14:
+        raise HTTPException(status_code=400, detail="cnpj deve conter 14 dígitos")
+    rows = _linhas(
+        """SELECT c.numero_compra, c.numero_controle_pncp, c.modalidade_nome,
+                  c.data_atualizacao, c.orgao_razao_social, c.nome_municipio,
+                  c.uf, c.objeto_compra, c.link_edital_pncp, m.score, m.motivos
+           FROM compra_livre.pncp_match m
+           JOIN compra_livre.pncp_contratacao c
+             ON c.numero_controle_pncp = m.numero_controle_pncp
+           WHERE m.cnpj = %s
+           ORDER BY c.data_atualizacao DESC NULLS LAST, m.score DESC
+           LIMIT %s OFFSET %s""",
+        (documento, limit, offset),
+    )
+    return {"data": rows, "limit": limit, "offset": offset}

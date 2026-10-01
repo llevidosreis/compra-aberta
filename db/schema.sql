@@ -347,3 +347,73 @@ BEGIN
         );
     END IF;
 END $$;
+
+-- ----------------------------------------------------------------------------
+-- PNCP, perfis de clientes e compatibilidade edital x empresa
+-- ----------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS compra_livre.pncp_contratacao (
+    numero_controle_pncp        TEXT PRIMARY KEY,
+    numero_compra               TEXT,
+    ano_compra                  INTEGER,
+    sequencial_compra           INTEGER,
+    modalidade_codigo          INTEGER,
+    modalidade_nome            TEXT,
+    data_publicacao             TIMESTAMPTZ,
+    data_atualizacao            TIMESTAMPTZ,
+    data_abertura_proposta      TIMESTAMPTZ,
+    data_encerramento_proposta  TIMESTAMPTZ,
+    orgao_cnpj                  TEXT NOT NULL,
+    orgao_razao_social          TEXT,
+    uf                          CHAR(2),
+    codigo_ibge_municipio       TEXT,
+    codigo_municipio            TEXT REFERENCES compra_livre.dim_municipio (codigo_municipio),
+    nome_municipio              TEXT,
+    objeto_compra               TEXT NOT NULL,
+    link_edital_pncp            TEXT,
+    objeto_normalizado          TEXT NOT NULL DEFAULT '',
+    exclusivo_me_epp            BOOLEAN,
+    criado_em                   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    atualizado_em               TIMESTAMPTZ NOT NULL DEFAULT now(),
+    data_atualizacao_pncp       TIMESTAMPTZ
+);
+
+CREATE INDEX IF NOT EXISTS idx_pncp_contratacao_uf_data
+    ON compra_livre.pncp_contratacao (uf, data_atualizacao_pncp DESC);
+CREATE INDEX IF NOT EXISTS idx_pncp_contratacao_municipio
+    ON compra_livre.pncp_contratacao (codigo_municipio);
+
+CREATE TABLE IF NOT EXISTS compra_livre.pncp_item (
+    numero_controle_pncp TEXT NOT NULL REFERENCES compra_livre.pncp_contratacao (numero_controle_pncp) ON DELETE CASCADE,
+    numero_item          TEXT NOT NULL,
+    descricao            TEXT,
+    quantidade           NUMERIC(18,4),
+    unidade              TEXT,
+    valor_estimado       NUMERIC(18,4),
+    codigo_catalogo      TEXT,
+    categoria_catalogo   TEXT,
+    objeto_normalizado   TEXT NOT NULL DEFAULT '',
+    atualizado_em        TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (numero_controle_pncp, numero_item)
+);
+
+CREATE TABLE IF NOT EXISTS compra_livre.perfil_cliente (
+    cnpj                    TEXT PRIMARY KEY REFERENCES compra_livre.dim_empresa (cnpj),
+    produtos_palavras_chave TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[],
+    ufs_atuacao             TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[],
+    municipios_atuacao      TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[],
+    ativo                   BOOLEAN NOT NULL DEFAULT TRUE,
+    atualizado_em           TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS compra_livre.pncp_match (
+    numero_controle_pncp TEXT NOT NULL REFERENCES compra_livre.pncp_contratacao (numero_controle_pncp) ON DELETE CASCADE,
+    cnpj                 TEXT NOT NULL REFERENCES compra_livre.dim_empresa (cnpj),
+    score                NUMERIC(5,4) NOT NULL CHECK (score >= 0 AND score <= 1),
+    motivos              JSONB NOT NULL DEFAULT '{}'::JSONB,
+    criado_em            TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (numero_controle_pncp, cnpj)
+);
+
+CREATE INDEX IF NOT EXISTS idx_pncp_match_criado_em
+    ON compra_livre.pncp_match (criado_em);
