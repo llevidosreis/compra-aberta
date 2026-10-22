@@ -348,6 +348,162 @@ BEGIN
     END IF;
 END $$;
 
+-- ============================================================================
+-- PAGAMENTOS POR NATUREZA E RECORTE DE MICROEMPRESAS
+-- (guia "Como reproduzir os valores do Portal da Transparência do TCE")
+--
+-- Medida financeira: valor_nota_pagamento das notas NÃO estornadas,
+-- vinculadas aos empenhos do exercício (inclui pagamentos posteriores ao
+-- ano, ex.: referência 202602 com exercicio_orcamento 202500).
+--
+-- Códigos e números ficam em TEXT para preservar zeros à esquerda.
+-- Não há FK para dim_municipio para que a apuração rode mesmo antes da
+-- carga de licitações.
+-- ============================================================================
+
+-- Cadastro de órgãos do exercício (passo 2). eh_camara é calculado a cada
+-- coleta a partir do próprio cadastro — nunca fixado como '01'.
+CREATE TABLE IF NOT EXISTS dim_orgao_tce (
+    codigo_municipio     TEXT NOT NULL,
+    exercicio_orcamento  TEXT NOT NULL,
+    codigo_orgao         TEXT NOT NULL,
+    nome_orgao           TEXT,
+    codigo_tipo_unidade  TEXT,
+    eh_camara            BOOLEAN NOT NULL DEFAULT FALSE,
+    motivo_camara        TEXT,
+    atualizado_em        TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (codigo_municipio, exercicio_orcamento, codigo_orgao)
+);
+
+-- Empenhos: um registro por chave completa de 6 campos (passo 5.2).
+CREATE TABLE IF NOT EXISTS fato_empenho_despesa (
+    codigo_municipio             TEXT NOT NULL,
+    exercicio_orcamento          TEXT NOT NULL,
+    codigo_orgao                 TEXT NOT NULL,
+    codigo_unidade_orcamentaria  TEXT NOT NULL,
+    data_emissao_empenho         DATE NOT NULL,
+    numero_empenho               TEXT NOT NULL,
+    codigo_elemento_despesa      TEXT,
+    elemento_despesa             TEXT,          -- 5ª e 6ª posições
+    documento_original           TEXT,          -- como veio da API
+    documento                    TEXT,          -- sem pontuação, ainda texto
+    tipo_documento               TEXT,          -- CNPJ, CPF, INVALIDO, AUSENTE
+    codigo_tipo_negociante       TEXT,
+    nome_negociante              TEXT,
+    data_referencia_doc          TEXT,
+    valor_empenhado              NUMERIC(18,4), -- só conferência; NÃO é somado
+    atualizado_em                TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (codigo_municipio, exercicio_orcamento, codigo_orgao,
+                 codigo_unidade_orcamentaria, data_emissao_empenho, numero_empenho)
+);
+CREATE INDEX IF NOT EXISTS idx_empenho_desp_documento ON fato_empenho_despesa (documento);
+
+-- Notas de pagamento: chave do empenho + sub-empenho + nota (passo 5.3).
+CREATE TABLE IF NOT EXISTS fato_pagamento_despesa (
+    codigo_municipio             TEXT NOT NULL,
+    exercicio_orcamento          TEXT NOT NULL,
+    codigo_orgao                 TEXT NOT NULL,
+    codigo_unidade_orcamentaria  TEXT NOT NULL,
+    data_emissao_empenho         DATE NOT NULL,
+    numero_empenho               TEXT NOT NULL,
+    numero_sub_empenho           TEXT NOT NULL,
+    numero_nota_pagamento        TEXT NOT NULL,
+    data_nota_pagamento          DATE,
+    data_referencia_doc          TEXT,
+    valor_nota_pagamento         NUMERIC(18,4),
+    estado_de_estornado          TEXT,
+    atualizado_em                TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (codigo_municipio, exercicio_orcamento, codigo_orgao,
+                 codigo_unidade_orcamentaria, data_emissao_empenho, numero_empenho,
+                 numero_sub_empenho, numero_nota_pagamento)
+);
+
+-- Classificação cadastral: um resultado por CNPJ completo + fonte + referência
+-- da base (passo 9). referencia_base_cadastral = 'NAO_INFORMADA' quando a
+-- fonte não informa a edição — a ausência fica registrada, não inventada.
+CREATE TABLE IF NOT EXISTS cadastro_porte_fornecedor (
+    cnpj_completo              TEXT NOT NULL,
+    fonte_cadastral            TEXT NOT NULL,
+    referencia_base_cadastral  TEXT NOT NULL DEFAULT 'NAO_INFORMADA',
+    cnpj_basico                TEXT NOT NULL,
+    porte_original             TEXT,          -- exatamente o que a fonte respondeu
+    porte_codigo               TEXT,          -- 01 ME, 03 EPP, 05 Demais, 00 Não informado
+    indicador_mei              BOOLEAN,       -- NULL = não informado
+    opcao_simples              BOOLEAN,       -- informativo; NÃO substitui o porte
+    razao_social               TEXT,
+    atualizado_na_fonte        TEXT,
+    consultado_em              TIMESTAMPTZ NOT NULL,
+    situacao_classificacao     TEXT NOT NULL, -- classificado, nao_encontrado, falha_consulta...
+    detalhe                    TEXT,
+    PRIMARY KEY (cnpj_completo, fonte_cadastral, referencia_base_cadastral)
+);
+
+-- Uma linha por execução da apuração, com todos os parâmetros do recorte.
+CREATE TABLE IF NOT EXISTS coleta_pagamentos (
+    id                          BIGSERIAL PRIMARY KEY,
+    codigo_municipio            TEXT NOT NULL,
+    exercicio_orcamento         TEXT NOT NULL,
+    referencia_empenhos_inicio  TEXT NOT NULL,
+    referencia_empenhos_fim     TEXT NOT NULL,
+    referencia_pagamentos_inicio TEXT NOT NULL,
+    referencia_pagamentos_fim   TEXT NOT NULL,
+    orgaos_excluidos            TEXT[] NOT NULL DEFAULT '{}',
+    regra_mei                   TEXT NOT NULL,
+    fonte_cadastral             TEXT NOT NULL,
+    referencia_base_cadastral   TEXT NOT NULL,
+    quantidade_empenhos         INTEGER,
+    quantidade_pagamentos       INTEGER,
+    quantidade_pendencias       INTEGER,
+    reconciliado                BOOLEAN,
+    status                      TEXT NOT NULL DEFAULT 'em_andamento', -- em_andamento, concluido, concluido_com_pendencias, erro
+    mensagem_erro               TEXT,
+    iniciado_em                 TIMESTAMPTZ NOT NULL DEFAULT now(),
+    finalizado_em               TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS idx_coleta_pag_mun_exerc
+    ON coleta_pagamentos (codigo_municipio, exercicio_orcamento, finalizado_em DESC);
+
+-- Totais por elemento e categoria de porte (passos 7 e 11). A soma das
+-- categorias de um elemento reconcilia com o total de controle.
+CREATE TABLE IF NOT EXISTS resumo_pagamento_categoria (
+    coleta_id            BIGINT NOT NULL REFERENCES coleta_pagamentos (id) ON DELETE CASCADE,
+    elemento_despesa     TEXT NOT NULL,
+    categoria_porte      TEXT NOT NULL,   -- ME, EPP, DEMAIS, SEM_CLASSIFICACAO...
+    quantidade_pagamentos INTEGER NOT NULL,
+    valor_pago           NUMERIC(18,4) NOT NULL,
+    PRIMARY KEY (coleta_id, elemento_despesa, categoria_porte)
+);
+
+-- Total por fornecedor em cada natureza (passo 11).
+CREATE TABLE IF NOT EXISTS resumo_pagamento_fornecedor (
+    coleta_id              BIGINT NOT NULL REFERENCES coleta_pagamentos (id) ON DELETE CASCADE,
+    elemento_despesa       TEXT NOT NULL,
+    documento              TEXT NOT NULL,
+    tipo_documento         TEXT,
+    nome_negociante        TEXT,
+    categoria_porte        TEXT NOT NULL,
+    porte_codigo           TEXT,
+    situacao_classificacao TEXT,
+    quantidade_pagamentos  INTEGER NOT NULL,
+    valor_pago             NUMERIC(18,4) NOT NULL,
+    PRIMARY KEY (coleta_id, elemento_despesa, documento)
+);
+CREATE INDEX IF NOT EXISTS idx_resumo_forn_categoria
+    ON resumo_pagamento_fornecedor (coleta_id, categoria_porte);
+
+-- Pendências rastreáveis (pagamento sem empenho, duplicação conflitante,
+-- órgão desconhecido, estado de estorno desconhecido...).
+CREATE TABLE IF NOT EXISTS pendencia_coleta_pagamentos (
+    id          BIGSERIAL PRIMARY KEY,
+    coleta_id   BIGINT NOT NULL REFERENCES coleta_pagamentos (id) ON DELETE CASCADE,
+    tipo        TEXT NOT NULL,
+    chave       TEXT NOT NULL,
+    detalhe     TEXT,
+    valor       NUMERIC(18,4),
+    documento   TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_pendencia_coleta ON pendencia_coleta_pagamentos (coleta_id, tipo);
+
 -- ----------------------------------------------------------------------------
 -- PNCP, perfis de clientes e compatibilidade edital x empresa
 -- ----------------------------------------------------------------------------

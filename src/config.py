@@ -59,9 +59,14 @@ def carregar_config_banco() -> ConfigBanco:
     return ConfigBanco(database_url=_obrigatoria("DATABASE_URL"))
 
 
-def carregar_config() -> Config:
+def carregar_config(exigir_banco: bool = True) -> Config:
+    """exigir_banco=False permite rodar a apuração de pagamentos só com
+    relatório em arquivo (opção --sem-banco), sem DATABASE_URL."""
     return Config(
-        database_url=_obrigatoria("DATABASE_URL"),
+        database_url=(
+            _obrigatoria("DATABASE_URL") if exigir_banco
+            else os.getenv("DATABASE_URL", "")
+        ),
         tce_base_url=os.getenv(
             "TCE_BASE_URL", "https://api-dados-abertos.tce.ce.gov.br/sim"
         ),
@@ -90,4 +95,4 @@ def carregar_config() -> Config:
         pncp_espera_429_segundos=max(
             1, int(os.getenv("PNCP_ESPERA_429_SEGUNDOS", "30"))
         ),
-     )
+    )
