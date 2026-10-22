@@ -39,6 +39,24 @@ class Config:
     http_timeout_segundos: int
     opencnpj_dias_validade_cache: int
     opencnpj_max_workers: int
+    pncp_base_url: str = "https://pncp.gov.br/api/consulta/v1"
+    pncp_page_size: int = 50
+    pncp_modalidades: tuple[int, ...] = (8, 9)
+    pncp_limiar_match: float = 0.35
+    pncp_intervalo_requisicoes_segundos: float = 1.0
+    pncp_espera_429_segundos: int = 30
+
+
+@dataclass(frozen=True)
+class ConfigBanco:
+    """Configuração mínima necessária para atender a API de leitura."""
+
+    database_url: str
+
+
+def carregar_config_banco() -> ConfigBanco:
+    """Carrega apenas a dependência da API, sem validar opções do pipeline."""
+    return ConfigBanco(database_url=_obrigatoria("DATABASE_URL"))
 
 
 def carregar_config(exigir_banco: bool = True) -> Config:
@@ -63,4 +81,18 @@ def carregar_config(exigir_banco: bool = True) -> Config:
         http_timeout_segundos=int(os.getenv("HTTP_TIMEOUT_SEGUNDOS", "30")),
         opencnpj_dias_validade_cache=int(os.getenv("OPENCNPJ_DIAS_VALIDADE_CACHE", "30")),
         opencnpj_max_workers=int(os.getenv("OPENCNPJ_MAX_WORKERS", "10")),
+        pncp_base_url=os.getenv("PNCP_BASE_URL", "https://pncp.gov.br/api/consulta/v1"),
+        pncp_page_size=min(50, max(10, int(os.getenv("PNCP_PAGE_SIZE", "50")))),
+        pncp_modalidades=tuple(
+            int(codigo.strip())
+            for codigo in os.getenv("PNCP_MODALIDADES", "8,9").split(",")
+            if codigo.strip()
+        ),
+        pncp_limiar_match=float(os.getenv("PNCP_LIMIAR_MATCH", "0.35")),
+        pncp_intervalo_requisicoes_segundos=max(
+            0.0, float(os.getenv("PNCP_INTERVALO_REQUISICOES_SEGUNDOS", "1"))
+        ),
+        pncp_espera_429_segundos=max(
+            1, int(os.getenv("PNCP_ESPERA_429_SEGUNDOS", "30"))
+        ),
     )

@@ -87,7 +87,9 @@ def main():
     parser_pag.add_argument(
         "--pagamentos-ate",
         help="Referência final dos pagamentos AAAAMM (padrão: mês anterior ao atual). "
-             "Para reproduzir o guia de Acaraú use 202609.",
+             "ATENÇÃO: para comparar com o portal, use o mês da 'Última atualização' "
+             "do rodapé da página (ex.: 27/09/2026 -> 202609); coletar menos meses "
+             "deixa todas as naturezas abaixo do portal. Guia de Acaraú: 202609.",
     )
     parser_pag.add_argument(
         "--regra-mei", choices=["incluir", "excluir"], default="incluir",
@@ -106,6 +108,20 @@ def main():
         help="Não grava no Postgres; gera só o relatório JSON em saidas/",
     )
     parser_pag.add_argument("--saida", default="saidas", help="Pasta dos relatórios")
+
+    # ------------------------------------------------------------------
+    # PNCP
+    # ------------------------------------------------------------------
+    parser_pncp_historico = subparsers.add_parser(
+        "pncp-historico", help="Carga histórica de contratações PNCP"
+    )
+    parser_pncp_historico.add_argument("--data-inicio", required=True, help="YYYY-MM-DD")
+    parser_pncp_historico.add_argument("--data-fim", required=True, help="YYYY-MM-DD")
+
+    parser_pncp_incremental = subparsers.add_parser(
+        "pncp-incremental", help="Carga incremental de contratações PNCP"
+    )
+    parser_pncp_incremental.add_argument("--dias", type=int, default=7, help="Janela retroativa em dias")
 
     args = parser.parse_args()
     config = carregar_config(
@@ -129,6 +145,13 @@ def main():
     elif args.modo == "dotacoes":
         from src.pipeline import dotacoes
         dotacoes.executar(config, args.data_inicio, args.data_fim)
+    elif args.modo == "pncp-historico":
+        from src.pipeline import pncp
+        pncp.executar_historico(config, args.data_inicio, args.data_fim)
+
+    elif args.modo == "pncp-incremental":
+        from src.pipeline import pncp
+        pncp.executar_incremental(config, args.dias)
 
     elif args.modo == "pagamentos":
         from src.pipeline import despesas_me
