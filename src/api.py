@@ -421,8 +421,7 @@ def licitacoes(
 
 
 @app.get(
-    "/licitacoes/{codigo_municipio}/{numero_licitacao}/dotacoes",
-    response_model=DotacoesResponse,
+    "/licitacoes/{codigo_municipio}/{numero_licitacao:path}/dotacoes",    response_model=DotacoesResponse,
     tags=["licitações"],
 )
 def dotacoes_licitacao(
@@ -455,8 +454,7 @@ def dotacoes_licitacao(
 
 
 @app.get(
-    "/licitacoes/{codigo_municipio}/{numero_licitacao}/itens",
-    response_model=ItensResponse,
+    "/licitacoes/{codigo_municipio}/{numero_licitacao:path}/itens",    response_model=ItensResponse,
     tags=["licitações"],
 )
 def itens_licitacao(
@@ -1067,6 +1065,253 @@ def participacao_me_por_natureza(
         "associacao": "licitacao",
         "observacao": "Quando uma licitacao possui varias naturezas, ela e contabilizada em cada natureza relacionada.",
     }
+
+
+# ----------------------------------------------------------------------------
+# Pagamentos da Prefeitura por natureza e recorte de Microempresas
+# (dados gravados por: python -m src.main pagamentos ...)
+# ----------------------------------------------------------------------------
+
+CATEGORIAS_PORTE = (
+    "ME", "EPP", "DEMAIS", "PORTE_NAO_INFORMADO", "SEM_CLASSIFICACAO",
+    "ME_EXCLUIDA_REGRA_MEI", "FAVORECIDO_CPF", "DOCUMENTO_INVALIDO_OU_AUSENTE",
+)
+
+
+class ColetaPagamentos(BaseModel):
+    coleta_id: int
+    codigo_municipio: str
+    exercicio_orcamento: str
+    referencia_empenhos_inicio: str
+    referencia_empenhos_fim: str
+    referencia_pagamentos_inicio: str
+    referencia_pagamentos_fim: str
+    orgaos_excluidos: list[str]
+    regra_mei: str
+    fonte_cadastral: str
+    referencia_base_cadastral: str
+    status: str
+    reconciliado: bool | None = None
+    quantidade_pendencias: int | None = None
+    finalizado_em: str | None = None
+
+
+class PagamentoNatureza(BaseModel):
+    codigo_natureza: str
+    nome_natureza: str
+    total_controle: str
+    quantidade_pagamentos: int
+    valores_por_categoria: dict[str, str]
+    valor_me: str
+    percentual_me: float | None = None
+    reconciliado: bool
+
+
+class PendenciaResumo(BaseModel):
+    tipo: str
+    quantidade: int
+    valor: str | None = None
+
+
+class PagamentosResumoResponse(BaseModel):
+    coleta: ColetaPagamentos
+    data: list[PagamentoNatureza]
+    total_controle: str
+    total_me: str
+    percentual_me: float | None = None
+    pendencias: list[PendenciaResumo]
+    observacao: str
+
+
+class FornecedorPagamento(BaseModel):
+    codigo_natureza: str
+    nome_natureza: str | None = None
+    documento: str
+    tipo_documento: str | None = None
+    nome_negociante: str | None = None
+    categoria_porte: str
+    porte_codigo: str | None = None
+    situacao_classificacao: str | None = None
+    quantidade_pagamentos: int
+    valor_pago: str
+
+
+class FornecedoresPagamentoResponse(Paginacao):
+    coleta_id: int
+    data: list[FornecedorPagamento]
+
+
+def _exercicio_de_ano(ano: int) -> str:
+    return f"{ano:04d}00"
+
+
+def _coleta_pagamentos(
+    codigo_municipio: str, ano: int, coleta_id: int | None
+) -> dict[str, Any]:
+    filtros = ["codigo_municipio = %s", "exercicio_orcamento = %s",
+               "status IN ('concluido', 'concluido_com_pendencias')"]
+    valores: list[Any] = [codigo_municipio, _exercicio_de_ano(ano)]
+    if coleta_id is not None:
+        filtros.append("id = %s")
+        valores.append(coleta_id)
+    rows = _linhas(
+        f"""
+        SELECT id AS coleta_id, codigo_municipio, exercicio_orcamento,
+               referencia_empenhos_inicio, referencia_empenhos_fim,
+               referencia_pagamentos_inicio, referencia_pagamentos_fim,
+               orgaos_excluidos, regra_mei, fonte_cadastral,
+               referencia_base_cadastral, status, reconciliado,
+               quantidade_pendencias, finalizado_em::text AS finalizado_em
+        FROM compra_livre.coleta_pagamentos
+        WHERE {' AND '.join(filtros)}
+        ORDER BY finalizado_em DESC NULLS LAST, id DESC
+        LIMIT 1
+        """,
+        tuple(valores),
+    )
+    if not rows:
+        raise HTTPException(
+            status_code=404,
+            detail="Nenhuma apuração de pagamentos concluída para esse município/ano",
+        )
+    return rows[0]
+
+
+@app.get(
+    "/analytics/pagamentos/resumo",
+    response_model=PagamentosResumoResponse,
+    tags=["pagamentos"],
+)
+def pagamentos_resumo(
+    codigo_municipio: str = Query(..., min_length=3, max_length=3),
+    ano: int = Query(..., ge=2000, le=2100),
+    coleta_id: int | None = Query(default=None, ge=1),
+) -> dict[str, Any]:
+    """Pagamentos da Prefeitura nas 7 naturezas: total de controle (todos os
+    portes) e subtotal de Microempresas (porte 01), por natureza."""
+    coleta = _coleta_pagamentos(codigo_municipio, ano, coleta_id)
+    linhas = _linhas(
+        """
+        SELECT r.elemento_despesa, n.nome_natureza, r.categoria_porte,
+               r.quantidade_pagamentos, r.valor_pago
+        FROM compra_livre.resumo_pagamento_categoria r
+        LEFT JOIN compra_livre.dim_natureza_despesa n
+          ON n.codigo_natureza = r.elemento_despesa
+        WHERE r.coleta_id = %s
+        ORDER BY r.elemento_despesa
+        """,
+        (coleta["coleta_id"],),
+    )
+    por_elemento: dict[str, dict[str, Any]] = {}
+    for linha in linhas:
+        item = por_elemento.setdefault(linha["elemento_despesa"], {
+            "codigo_natureza": linha["elemento_despesa"],
+            "nome_natureza": linha["nome_natureza"] or linha["elemento_despesa"],
+            "total": Decimal("0"),
+            "quantidade_pagamentos": 0,
+            "valores": {c: Decimal("0") for c in CATEGORIAS_PORTE},
+        })
+        valor = Decimal(linha["valor_pago"])
+        item["total"] += valor
+        item["quantidade_pagamentos"] += linha["quantidade_pagamentos"]
+        item["valores"][linha["categoria_porte"]] = valor
+
+    def pct(parte: Decimal, total: Decimal) -> float | None:
+        return round(float(parte / total * 100), 2) if total else None
+
+    centavo = Decimal("0.01")
+    data = []
+    total_controle, total_me = Decimal("0"), Decimal("0")
+    for item in por_elemento.values():
+        me = item["valores"]["ME"]
+        total_controle += item["total"]
+        total_me += me
+        data.append({
+            "codigo_natureza": item["codigo_natureza"],
+            "nome_natureza": item["nome_natureza"],
+            "total_controle": str(item["total"].quantize(centavo)),
+            "quantidade_pagamentos": item["quantidade_pagamentos"],
+            "valores_por_categoria": {
+                c: str(v.quantize(centavo)) for c, v in item["valores"].items()
+            },
+            "valor_me": str(me.quantize(centavo)),
+            "percentual_me": pct(me, item["total"]),
+            "reconciliado": bool(coleta["reconciliado"]),
+        })
+
+    pendencias = _linhas(
+        """
+        SELECT tipo, COUNT(*) AS quantidade, ROUND(SUM(valor), 2)::text AS valor
+        FROM compra_livre.pendencia_coleta_pagamentos
+        WHERE coleta_id = %s
+        GROUP BY tipo
+        ORDER BY tipo
+        """,
+        (coleta["coleta_id"],),
+    )
+    return {
+        "coleta": coleta,
+        "data": data,
+        "total_controle": str(total_controle.quantize(centavo)),
+        "total_me": str(total_me.quantize(centavo)),
+        "percentual_me": pct(total_me, total_controle),
+        "pendencias": pendencias,
+        "observacao": (
+            "Valor pago = notas de pagamento não estornadas vinculadas aos empenhos "
+            f"do orçamento {ano}, com referências de "
+            f"{coleta['referencia_pagamentos_inicio']} a {coleta['referencia_pagamentos_fim']}; "
+            "Câmara excluída. Porte conforme "
+            f"{coleta['fonte_cadastral']} (referência da base: "
+            f"{coleta['referencia_base_cadastral']}). Fornecedores sem "
+            "classificação ficam fora do subtotal ME até serem reprocessados."
+        ),
+    }
+
+
+@app.get(
+    "/analytics/pagamentos/fornecedores",
+    response_model=FornecedoresPagamentoResponse,
+    tags=["pagamentos"],
+)
+def pagamentos_fornecedores(
+    codigo_municipio: str = Query(..., min_length=3, max_length=3),
+    ano: int = Query(..., ge=2000, le=2100),
+    codigo_natureza: str | None = Query(default=None, min_length=2, max_length=2),
+    categoria_porte: str | None = Query(default="ME", max_length=40),
+    coleta_id: int | None = Query(default=None, ge=1),
+    limit: int = Query(default=100, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+) -> dict[str, Any]:
+    """Total pago por fornecedor em cada natureza. Por padrão só ME;
+    envie categoria_porte vazio para todas as categorias."""
+    if categoria_porte and categoria_porte not in CATEGORIAS_PORTE:
+        raise HTTPException(status_code=400, detail="categoria_porte inválida")
+    coleta = _coleta_pagamentos(codigo_municipio, ano, coleta_id)
+    filtros = ["f.coleta_id = %s"]
+    valores: list[Any] = [coleta["coleta_id"]]
+    if codigo_natureza:
+        filtros.append("f.elemento_despesa = %s")
+        valores.append(codigo_natureza)
+    if categoria_porte:
+        filtros.append("f.categoria_porte = %s")
+        valores.append(categoria_porte)
+    valores.extend([limit, offset])
+    rows = _linhas(
+        f"""
+        SELECT f.elemento_despesa AS codigo_natureza, n.nome_natureza,
+               f.documento, f.tipo_documento, f.nome_negociante,
+               f.categoria_porte, f.porte_codigo, f.situacao_classificacao,
+               f.quantidade_pagamentos, ROUND(f.valor_pago, 2)::text AS valor_pago
+        FROM compra_livre.resumo_pagamento_fornecedor f
+        LEFT JOIN compra_livre.dim_natureza_despesa n
+          ON n.codigo_natureza = f.elemento_despesa
+        WHERE {' AND '.join(filtros)}
+        ORDER BY f.valor_pago DESC, f.documento
+        LIMIT %s OFFSET %s
+        """,
+        tuple(valores),
+    )
+    return {"coleta_id": coleta["coleta_id"], "data": rows, "limit": limit, "offset": offset}
 
 
 @app.get("/")

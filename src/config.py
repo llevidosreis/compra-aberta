@@ -41,9 +41,14 @@ class Config:
     opencnpj_max_workers: int
 
 
-def carregar_config() -> Config:
+def carregar_config(exigir_banco: bool = True) -> Config:
+    """exigir_banco=False permite rodar a apuração de pagamentos só com
+    relatório em arquivo (opção --sem-banco), sem DATABASE_URL."""
     return Config(
-        database_url=_obrigatoria("DATABASE_URL"),
+        database_url=(
+            _obrigatoria("DATABASE_URL") if exigir_banco
+            else os.getenv("DATABASE_URL", "")
+        ),
         tce_base_url=os.getenv(
             "TCE_BASE_URL", "https://api-dados-abertos.tce.ce.gov.br/sim"
         ),
