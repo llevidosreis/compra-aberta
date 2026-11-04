@@ -50,7 +50,8 @@ def upsert_empresas_enriquecidas(conn, empresas: list[DadosEmpresa]) -> None:
         INSERT INTO compra_livre.dim_empresa (
             cnpj, razao_social, nome_fantasia, situacao_cadastral,
             data_inicio_atividade, cnae_principal, cnaes_secundarios,
-            porte_empresa, uf_empresa, municipio_empresa,
+            porte_empresa, opcao_mei, fonte_atualizada_em,
+            uf_empresa, municipio_empresa,
             enriquecido, encontrado_opencnpj, consultado_em
         )
         VALUES %s
@@ -62,6 +63,8 @@ def upsert_empresas_enriquecidas(conn, empresas: list[DadosEmpresa]) -> None:
             cnae_principal = EXCLUDED.cnae_principal,
             cnaes_secundarios = EXCLUDED.cnaes_secundarios,
             porte_empresa = EXCLUDED.porte_empresa,
+            opcao_mei = EXCLUDED.opcao_mei,
+            fonte_atualizada_em = EXCLUDED.fonte_atualizada_em,
             uf_empresa = EXCLUDED.uf_empresa,
             municipio_empresa = EXCLUDED.municipio_empresa,
             enriquecido = TRUE,
@@ -83,6 +86,8 @@ def upsert_empresas_enriquecidas(conn, empresas: list[DadosEmpresa]) -> None:
             empresa.cnae_principal,
             json.dumps(empresa.cnaes_secundarios),
             empresa.porte_empresa,
+            empresa.opcao_mei,
+            empresa.fonte_atualizada_em,
             empresa.uf,
             empresa.municipio,
             True,

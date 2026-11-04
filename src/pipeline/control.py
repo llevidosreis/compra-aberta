@@ -71,6 +71,18 @@ def registrar_erro(conn, execucao_id: int, mensagem: str) -> None:
         )
 
 
+def reabrir_execucao(conn, execucao_id: int) -> None:
+    with conn.cursor() as cursor:
+        cursor.execute(
+            """
+            UPDATE compra_livre.pipeline_execucoes
+            SET status = 'em_andamento', mensagem_erro = NULL, finalizado_em = NULL
+            WHERE id = %s
+            """,
+            (execucao_id,),
+        )
+
+
 def buscar_execucao_incompleta(
     conn, fonte: str, modo: str, codigo_municipio: str | None,
     data_inicio: str | None, data_fim: str | None
@@ -88,7 +100,7 @@ def buscar_execucao_incompleta(
               AND modo = %s
               AND data_inicio IS NOT DISTINCT FROM %s
               AND data_fim IS NOT DISTINCT FROM %s
-              AND status = 'em_andamento'
+              AND status IN ('em_andamento', 'erro')
             ORDER BY iniciado_em DESC
             LIMIT 1
             """,

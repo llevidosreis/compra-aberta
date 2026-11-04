@@ -5,11 +5,13 @@ Cliente da API OpenCNPJ.
 """
 
 from dataclasses import dataclass
+from datetime import datetime
 import time
 
 import requests
 
 from src.config import Config
+from src.eligibility import cnpj_numerico_valido
 
 
 @dataclass
@@ -24,6 +26,8 @@ class DadosEmpresa:
     uf: str | None
     municipio: str | None
     porte_empresa: str | None
+    opcao_mei: str | None
+    fonte_atualizada_em: datetime | None
     encontrado: bool
 
 
@@ -53,6 +57,10 @@ class OpenCNPJClient:
             for caractere in cnpj
             if caractere.isdigit()
         )
+        if not cnpj_numerico_valido(cnpj_limpo):
+            raise ValueError(
+                "OpenCNPJ exige um CNPJ numérico válido com 14 dígitos"
+            )
 
         url = (
             f"{self._config.opencnpj_base_url}"
@@ -107,6 +115,10 @@ class OpenCNPJClient:
                 resposta.raise_for_status()
 
                 dados = resposta.json()
+                if dados.get("cnpj") != cnpj_limpo:
+                    raise RuntimeError(
+                        "OpenCNPJ retornou um CNPJ diferente do consultado"
+                    )
 
                 return DadosEmpresa(
                     cnpj=cnpj_limpo,
@@ -129,6 +141,10 @@ class OpenCNPJClient:
                     municipio=dados.get("municipio"),
                     porte_empresa=dados.get(
                         "porte_empresa"
+                    ),
+                    opcao_mei=dados.get("opcao_mei"),
+                    fonte_atualizada_em=self._timestamp_fonte(
+                        dados.get("updated_at")
                     ),
                     encontrado=True,
                 )
@@ -172,5 +188,16 @@ class OpenCNPJClient:
             uf=None,
             municipio=None,
             porte_empresa=None,
+            opcao_mei=None,
+            fonte_atualizada_em=None,
             encontrado=False,
         )
+
+    @staticmethod
+    def _timestamp_fonte(valor: str | None) -> datetime | None:
+        if not valor:
+            return None
+        atualizado_em = datetime.fromisoformat(valor.replace("Z", "+00:00"))
+        if atualizado_em.tzinfo is None:
+            raise ValueError("OpenCNPJ updated_at deve conter fuso horário")
+        return atualizado_em

@@ -10,11 +10,13 @@ mas não são tratados como empresas para fins de enriquecimento.
 
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import date, datetime, timezone
 
 from src.cache.cnpj_cache import cnpjs_pendentes_de_consulta
 from src.clients.opencnpj_client import DadosEmpresa, OpenCNPJClient
 from src.config import Config
 from src.db import conexao
+from src.eligibility import empresa_me_confirmada
 from src.load.load_dimensoes import upsert_empresas_enriquecidas
 
 logger = logging.getLogger(__name__)
@@ -25,10 +27,28 @@ TAMANHO_LOTE = 25
 def enriquecer_empresas_pendentes(
     config: Config,
     client: OpenCNPJClient,
+    *,
+    data_inicio: str | None = None,
+    data_fim: str | None = None,
+    codigo_municipio: str | None = None,
 ) -> int:
     """
-    Consulta somente CNPJs (14 dígitos) sem cache válido.
+    Consulta CNPJs (14 dígitos) sem cache válido; opcionalmente limita aos
+    itens do período e município informados.
     """
+    if (data_inicio is None) != (data_fim is None):
+        raise ValueError("data_inicio e data_fim devem ser informados juntos.")
+    if codigo_municipio is not None and data_inicio is None:
+        raise ValueError(
+            "codigo_municipio requer data_inicio e data_fim para limitar o enriquecimento."
+        )
+    if data_inicio is not None and data_fim is not None:
+        inicio = date.fromisoformat(data_inicio)
+        fim = date.fromisoformat(data_fim)
+        if inicio.isoformat() != data_inicio or fim.isoformat() != data_fim:
+            raise ValueError("data_inicio e data_fim devem estar no formato YYYY-MM-DD.")
+        if inicio > fim:
+            raise ValueError("data_inicio não pode ser posterior a data_fim.")
 
     total_enriquecido = 0
     falhos_nesta_execucao: set[str] = set()
@@ -39,6 +59,9 @@ def enriquecer_empresas_pendentes(
                 config,
                 limite=1000,
                 excluir=falhos_nesta_execucao,
+                data_inicio=data_inicio,
+                data_fim=data_fim,
+                codigo_municipio=codigo_municipio,
             )
         if not pendentes:
             break
@@ -78,6 +101,11 @@ def enriquecer_empresas_pendentes(
         total_enriquecido,
     )
 
+    if falhos_nesta_execucao:
+        raise RuntimeError(
+            f"Falha ao consultar {len(falhos_nesta_execucao)} CNPJ(s) no OpenCNPJ."
+        )
+
     return total_enriquecido
 
 
@@ -90,5 +118,27 @@ def _gravar_lote(
     if not lote:
         return
 
+    agora = datetime.now(timezone.utc)
+    total_me_confirmadas = sum(
+        empresa_me_confirmada(
+            cnpj=empresa.cnpj,
+            porte=empresa.porte_empresa,
+            opcao_mei=empresa.opcao_mei,
+            encontrado=empresa.encontrado,
+            enriquecido=True,
+            consultado_em=agora,
+            fonte_atualizada_em=empresa.fonte_atualizada_em,
+            dias_validade_cache=config.opencnpj_dias_validade_cache,
+            agora=agora,
+        )
+        for empresa in lote
+    )
+
     with conexao(config) as conn:
         upsert_empresas_enriquecidas(conn, lote)
+
+    logger.info(
+        "Lote OpenCNPJ persistido: %d empresas, %d classificadas como ME elegível.",
+        len(lote),
+        total_me_confirmadas,
+    )

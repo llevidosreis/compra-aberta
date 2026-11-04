@@ -12,13 +12,16 @@ IMPORTANTE sobre codigo_municipio: apesar do texto da documentação
 original dizer que esse parâmetro "corresponde ao código IBGE", os
 testes reais mostraram que a API espera o código PRÓPRIO do TCE-CE
 (3 dígitos, ex: "010" = Amontada), não o código IBGE de 7 dígitos.
-Esse código de 3 dígitos é obtido pelo endpoint /sim/dv_municipios
+Esse código de 3 dígitos é obtido pelo endpoint /sim/municipios
 (não documentado no PDF original, encontrado testando a API), que
 devolve os dois códigos lado a lado. listar_municipios(), abaixo, usa
 esse endpoint em vez da API do IBGE.
 """
 from collections.abc import Iterator
 from dataclasses import dataclass
+from datetime import date
+import hashlib
+import json
 from typing import Any
 
 import requests
@@ -62,6 +65,13 @@ class TCEClient:
         """
         url = f"{self._config.tce_base_url}/{endpoint}"
         start_index = start_index_inicial
+        paginas_vistas: set[str] = set()
+        if endpoint in {
+            "itens_compoem_bens_servicos",
+            "dotacoes_utilizadas_contratacoes",
+        }:
+            data_inicio = date.fromisoformat(data_inicio).strftime("%Y%m%d")
+            data_fim = date.fromisoformat(data_fim).strftime("%Y%m%d")
 
         while True:
             params = {
@@ -78,11 +88,24 @@ class TCEClient:
             if not registros:
                 return
 
-            yield registros, start_index
+            # Uma repetição exata em offsets distintos torna impossível provar
+            # a completude da coleta. Falhar é preferível a repetir staging e
+            # avançar checkpoints como se a fonte estivesse paginando.
+            assinatura = hashlib.sha256(
+                json.dumps(
+                    registros, sort_keys=True, ensure_ascii=False, default=str,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest()
+            if assinatura in paginas_vistas:
+                raise TCEClienteError(
+                    "Pagina repetida ao paginar "
+                    f"{url}; start_index={start_index}; params={params}. "
+                    "A coleta foi interrompida porque a completude nao pode ser comprovada."
+                )
+            paginas_vistas.add(assinatura)
 
-            if len(registros) < self._config.tce_page_size:
-                # página incompleta: é a última, não precisa de mais uma chamada
-                return
+            yield registros, start_index
 
             start_index += self._config.tce_page_size
 
@@ -98,7 +121,18 @@ class TCEClient:
                 )
                 resposta.raise_for_status()
                 corpo = resposta.json()
-                return corpo.get("elements", [])
+                if not isinstance(corpo, dict) or "elements" not in corpo:
+                    raise TCEClienteError(
+                        f"Invalid JSON response from {url}: missing object/list elements; params={params}"
+                    )
+                elementos = corpo["elements"]
+                if not isinstance(elementos, list) or not all(isinstance(item, dict) for item in elementos):
+                    raise TCEClienteError(
+                        f"Invalid JSON response from {url}: elements must be a list of objects; params={params}"
+                    )
+                return elementos
+            except TCEClienteError:
+                raise
             except (requests.RequestException, ValueError) as erro:
                 ultimo_erro = erro
                 status = (
@@ -169,7 +203,7 @@ class TCEClient:
         )
 
     def listar_municipios(self, max_tentativas: int = 3) -> list[MunicipioTCE]:
-        """Busca a lista oficial de municípios do endpoint /sim/dv_municipios,
+        """Busca a lista oficial de municípios do endpoint /sim/municipios,
         que traz o código do TCE-CE e o código IBGE lado a lado. Descarta
         registros sem codigo_ibge (ex.: "001 - T.C.M.", que não é um
         município de verdade, é um código administrativo interno do TCE).

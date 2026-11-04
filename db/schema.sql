@@ -19,13 +19,11 @@
 --         re-somar toda vez.
 --
 -- 3. fato_licitacao guarda o "cabeçalho" da licitação (1 linha por
---    codigo_municipio + numero_licitacao), com o valor total consolidado
---    de todas as empresas. Facilita contagens e listagens do Full Stack
---    sem precisar agregar em tempo de consulta.
+--    codigo_municipio + numero_licitacao), com o valor e a quantidade de
+--    todos os itens, mesmo quando o fornecedor não puder ser identificado.
 --
--- 4. stg_* (staging) recebe o dado bruto da API antes de qualquer
---    transformação, servindo de base para reprocessamento sem precisar
---    chamar a API de novo, e para auditoria em caso de divergência.
+-- 4. stg_* (staging) recebe registros normalizados antes da agregação
+--    nas tabelas fato. O pipeline limpa esse staging após a transformação.
 --
 -- 5. pipeline_execucoes controla a paginação (start_index de retomada) e
 --    o status de cada execução, permitindo retomar uma carga interrompida
@@ -43,7 +41,7 @@
 --    usar o mesmo valor em todo o banco evita qualquer tradução na hora
 --    de gravar. A tradução entre os dois códigos é feita uma única vez,
 --    na carga de dim_municipio, a partir do endpoint oficial do TCE-CE
---    que já entrega os dois lado a lado (/sim/dv_municipios).
+--    que já entrega os dois lado a lado (/sim/municipios).
 -- ============================================================================
 
 CREATE SCHEMA IF NOT EXISTS compra_livre;
@@ -71,6 +69,8 @@ CREATE TABLE IF NOT EXISTS dim_empresa (
     cnae_principal            TEXT,
     cnaes_secundarios        JSONB,                     -- lista de códigos, formato livre do OpenCNPJ
     porte_empresa             TEXT,                      -- ME, EPP, DEMAIS etc.
+    opcao_mei                  TEXT,                      -- S/N/indefinido conforme dataset Receita do OpenCNPJ
+    fonte_atualizada_em        TIMESTAMPTZ,               -- atualização da base Receita publicada pelo OpenCNPJ
     uf_empresa                CHAR(2),
     municipio_empresa        TEXT,
     -- controle do enriquecimento / cache:
@@ -80,6 +80,19 @@ CREATE TABLE IF NOT EXISTS dim_empresa (
     criado_em                 TIMESTAMPTZ NOT NULL DEFAULT now(),
     atualizado_em             TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+ALTER TABLE compra_livre.dim_empresa
+    ADD COLUMN IF NOT EXISTS opcao_mei TEXT;
+ALTER TABLE compra_livre.dim_empresa
+    ADD COLUMN IF NOT EXISTS fonte_atualizada_em TIMESTAMPTZ;
+
+-- Refaz consultas antigas sem os novos campos necessários à elegibilidade.
+UPDATE compra_livre.dim_empresa
+SET enriquecido = FALSE
+WHERE enriquecido IS TRUE
+  AND LENGTH(cnpj) = 14
+  AND cnpj ~ '^[0-9]{14}$'
+  AND (opcao_mei IS NULL OR fonte_atualizada_em IS NULL);
 
 CREATE INDEX IF NOT EXISTS idx_dim_empresa_porte ON dim_empresa (porte_empresa);
 
@@ -103,7 +116,7 @@ ON CONFLICT (codigo_natureza) DO UPDATE
 SET nome_natureza = EXCLUDED.nome_natureza, atualizado_em = now();
 
 -- ----------------------------------------------------------------------------
--- STAGING (dado bruto, pré-transformação)
+-- STAGING (registros normalizados, pré-agregação)
 -- ----------------------------------------------------------------------------
 
 CREATE TABLE IF NOT EXISTS stg_licitante (
@@ -130,7 +143,7 @@ CREATE TABLE IF NOT EXISTS stg_item_licitacao (
     data_realizacao_licitacao           DATE,
     numero_licitacao                    TEXT NOT NULL,
     numero_sequencial_item_licitacao    BIGINT NOT NULL,
-    numero_documento_negociante         TEXT NOT NULL,
+    numero_documento_negociante         TEXT,
     descricao_item_licitacao            TEXT,
     valor_vencedor_item_licitacao       NUMERIC(18,2),
     codigo_tipo_negociante              TEXT,
@@ -142,6 +155,14 @@ CREATE TABLE IF NOT EXISTS stg_item_licitacao (
     UNIQUE (codigo_municipio, numero_licitacao, numero_sequencial_item_licitacao, numero_documento_negociante)
 );
 
+ALTER TABLE compra_livre.stg_item_licitacao
+    ALTER COLUMN numero_documento_negociante DROP NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_stg_item_licitacao_chave
+    ON compra_livre.stg_item_licitacao (
+        codigo_municipio, numero_licitacao, numero_sequencial_item_licitacao,
+        (COALESCE(numero_documento_negociante, ''))
+    );
+
 -- ----------------------------------------------------------------------------
 -- FATOS
 -- ----------------------------------------------------------------------------
@@ -151,7 +172,7 @@ CREATE TABLE IF NOT EXISTS fato_item_licitacao (
     codigo_municipio                    TEXT NOT NULL REFERENCES dim_municipio (codigo_municipio),
     numero_licitacao                    TEXT NOT NULL,
     numero_sequencial_item_licitacao    BIGINT NOT NULL,
-    cnpj                                 TEXT NOT NULL REFERENCES dim_empresa (cnpj),
+    cnpj                                 TEXT REFERENCES dim_empresa (cnpj),
     descricao_item_licitacao            TEXT,
     unidade                              TEXT,
     quantidade                           NUMERIC(18,4),
@@ -166,6 +187,12 @@ CREATE INDEX IF NOT EXISTS idx_fato_item_municipio ON fato_item_licitacao (codig
 CREATE INDEX IF NOT EXISTS idx_fato_item_cnpj ON fato_item_licitacao (cnpj);
 CREATE INDEX IF NOT EXISTS idx_fato_item_municipio_licitacao
     ON fato_item_licitacao (codigo_municipio, numero_licitacao);
+ALTER TABLE compra_livre.fato_item_licitacao ALTER COLUMN cnpj DROP NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_fato_item_licitacao_chave
+    ON compra_livre.fato_item_licitacao (
+        codigo_municipio, numero_licitacao, numero_sequencial_item_licitacao,
+        (COALESCE(cnpj, ''))
+    );
 
 -- Agregado por CNPJ + licitação, seguindo literalmente a regra da documentação
 -- (seção 2 do PDF): soma de valor_vencedor_item_licitacao quando o mesmo par
@@ -187,8 +214,8 @@ CREATE INDEX IF NOT EXISTS idx_participacao_municipio ON fato_participacao_empre
 CREATE INDEX IF NOT EXISTS idx_participacao_municipio_licitacao
     ON fato_participacao_empresa (codigo_municipio, numero_licitacao);
 
--- Cabeçalho da licitação: 1 linha por município + número, com valor total
--- somando todas as empresas participantes (facilita listagem no Full Stack).
+-- Cabeçalho da licitação: valor e contagem de todos os itens; contagem de
+-- empresas considera somente os fornecedores identificados.
 CREATE TABLE IF NOT EXISTS fato_licitacao (
     id                          BIGSERIAL PRIMARY KEY,
     codigo_municipio            TEXT NOT NULL REFERENCES dim_municipio (codigo_municipio),
@@ -295,8 +322,8 @@ END $$;
 
 CREATE TABLE IF NOT EXISTS pipeline_execucoes (
     id                BIGSERIAL PRIMARY KEY,
-    fonte             TEXT NOT NULL,               -- 'tce_licitantes', 'tce_itens', 'ibge_municipios', 'opencnpj'
-    modo              TEXT NOT NULL,                -- 'full' ou 'incremental'
+    fonte             TEXT NOT NULL,               -- 'tce_licitantes', 'tce_itens' ou 'tce_dotacoes'
+    modo              TEXT NOT NULL,                -- full, incremental, reprocessamento ou dotacoes
     codigo_municipio TEXT,                          -- NULL quando não se aplica (ex.: ibge_municipios)
     data_inicio       DATE,
     data_fim           DATE,
@@ -505,7 +532,7 @@ CREATE TABLE IF NOT EXISTS pendencia_coleta_pagamentos (
 CREATE INDEX IF NOT EXISTS idx_pendencia_coleta ON pendencia_coleta_pagamentos (coleta_id, tipo);
 
 -- ----------------------------------------------------------------------------
--- PNCP, perfis de clientes e compatibilidade edital x empresa
+-- FUTURO (não usado pelo pipeline ativo): PNCP, perfis de clientes e compatibilidade edital x empresa
 -- ----------------------------------------------------------------------------
 
 CREATE TABLE IF NOT EXISTS compra_livre.pncp_contratacao (

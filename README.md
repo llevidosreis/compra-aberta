@@ -8,12 +8,12 @@ time de Full Stack.
 
 Construir e manter uma base PostgreSQL com licitações, itens licitados,
 empresas participantes e o porte dessas empresas, permitindo identificar a
-participação de micro e pequenas empresas (ME/EPP) nas compras públicas dos
-municípios do Ceará.
+participação de microempresas (ME) elegíveis nas compras públicas dos
+municípios do Ceará. MEI, EPP e portes desconhecidos não entram na
+elegibilidade do Compra Livre.
 
-O PNCP **não** é consumido por este pipeline — é responsabilidade do time de
-Full Stack. O banco está desenhado para poder receber dados do PNCP depois,
-se precisar, mas isso não é implementado aqui.
+Este pipeline cobre TCE-CE + enriquecimento de empresas via OpenCNPJ e não
+implementa integração PNCP nem outras fontes fora do escopo atual.
 
 CATMAT/CATSER também não está implementado nesta versão: a documentação
 oficial fornecida não define um endpoint de API confiável para consulta
@@ -24,25 +24,20 @@ aberto — ver seção "Limitações" no final.
 ## 2. Arquitetura
 
 ```
-IBGE (municípios do CE)
-        │
-        ▼
-TCE-CE /licitantes_fornecedores_bens_servicos ──┐
-        │                                        │ cruzamento por
-        ▼                                        │ CNPJ + numero_licitacao
-TCE-CE /itens_compoem_bens_servicos ─────────────┘
-        │
-        ▼
-OpenCNPJ (enriquecimento, com cache em dim_empresa)
-        │
-        ▼
-staging (Postgres) → fato_item_licitacao → fato_participacao_empresa → fato_licitacao
-
-PNCP /contratacoes/publicacao + /contratacoes/atualizacao + /contratacoes/proposta
-  │
-  ▼
-pncp_contratacao + pncp_item → perfil_cliente → pncp_match → API GET para o Full Stack
+TCE-CE licitantes ──→ stg_licitante ──→ endereço consultivo da API
+       │
+       ├──→ dim_empresa (identificadores e nomes básicos)
+       │        ↑
+       │     OpenCNPJ (porte verificado; cache em dim_empresa)
+       │
+TCE-CE itens ──────→ stg_item_licitacao → fato_item_licitacao
+               → fato_participacao_empresa
+               → fato_licitacao
 ```
+
+Os fatos TCE são transformados e publicados município a município, antes do
+enriquecimento OpenCNPJ. A API pode consultar os totais enquanto empresas sem
+classificação confiável permanecem fora das rotas que exigem elegibilidade ME.
 
 A ordem de agregação segue literalmente a regra da documentação: quando o
 mesmo CNPJ aparece mais de uma vez na mesma licitação, os valores são
@@ -54,7 +49,7 @@ justificativa completa da modelagem).
 
 | Fonte | Uso | Paginação |
 |---|---|---|
-| TCE-CE `sim/dv_municipios` | lista de municípios do CE com o código próprio do TCE + código IBGE lado a lado | sim, 200/página |
+| TCE-CE `sim/municipios` (dataset `dv_municipios`) | lista de municípios do CE com o código próprio do TCE + código IBGE lado a lado | sim, 200/página |
 | TCE-CE `sim/licitantes_fornecedores_bens_servicos` | empresas participantes | sim, 1000/página |
 | TCE-CE `sim/itens_compoem_bens_servicos` | itens e valores das licitações | sim, 1000/página |
 | TCE-CE `sim/dotacoes_utilizadas_contratacoes` | dotações e elementos de despesa associados às licitações | sim, 1000/página |
@@ -62,9 +57,9 @@ justificativa completa da modelagem).
 | TCE-CE `sim/orgaos` | órgãos do município/exercício (identifica a Câmara) — fluxo de pagamentos | não |
 | TCE-CE `sim/notas_empenhos` | empenhos: credor, CNPJ/CPF, elemento de despesa — fluxo de pagamentos | sim, 1000/página, mês a mês |
 | TCE-CE `sim/notas_pagamentos` | notas de pagamento: valor pago, estorno — fluxo de pagamentos | sim, 1000/página, mês a mês |
-| PNCP `/contratacoes/publicacao` | contratações por publicação e modalidade | sim, total de páginas informado pela API |
-| PNCP `/contratacoes/atualizacao` | contratações alteradas na janela incremental | sim, total de páginas informado pela API |
-| PNCP `/contratacoes/proposta` | contratações recebendo propostas | sim, total de páginas informado pela API |
+Nos endpoints TCE-CE de itens e dotações, `data_inicio` e `data_fim` devem ser
+enviados no formato `YYYYMMDD`; o endpoint de licitantes usa `YYYY-MM-DD`.
+O cliente faz essa conversão por endpoint.
 
 Para descobrir o código TCE de um município pelo navegador, abra
 `https://api-dados-abertos.tce.ce.gov.br/sim/municipios` e busque o nome
@@ -80,8 +75,7 @@ parâmetro esperado — e o valor que a própria API devolve dentro de cada
 registro — é o **código interno do TCE-CE, com 3 dígitos** (ex.: `010` =
 Amontada), não o código IBGE de 7 dígitos.
 
-O endpoint `sim/dv_municipios` (não documentado no PDF original, encontrado
-testando a API diretamente) resolve isso: devolve `codigo_municipio` (TCE),
+O endpoint `sim/municipios` (dataset `dv_municipios`) resolve isso: devolve `codigo_municipio` (TCE),
 `codigo_municipio_ibge` e `codigo_municipio_geonames` juntos para os 184
 municípios do Ceará. O pipeline usa esse endpoint como fonte de
 `dim_municipio` e como fonte da lista de municípios a percorrer no full
@@ -156,12 +150,51 @@ cp .env.example .env
 Edite `.env` e coloque a `DATABASE_URL` do seu projeto Supabase (Project
 Settings > Database > Connection string).
 
+### Docker Compose (PostgreSQL local, API e cargas sob demanda)
+
+O Compose usa o volume existente `compra_livre_pgdata`; não remova esse volume.
+O arquivo `postgres-docker.env`, fora do repositório, deve conter
+`POSTGRES_PASSWORD` com a mesma senha usada na inicialização do container
+PostgreSQL e `APP_DATABASE_URL` no formato
+`postgresql://compra_livre:SENHA_CODIFICADA@postgres:5432/compra_livre`.
+Codifique caracteres especiais da senha conforme a codificação de URL. O `.env`
+do projeto continua fornecendo as demais configurações da aplicação; o Compose
+sobrescreve `DATABASE_URL` para usar o host `postgres` dentro da rede Docker.
+
+Como o container atual foi criado com `docker run`, pare-o antes de transferir o
+volume para o Compose. Isso preserva o volume e o banco:
+
+```powershell
+docker stop compra-livre-postgres
+Set-Location "C:\Users\olive\Downloads\compra-livre (1)\compra-livre"
+docker compose --env-file "$HOME\postgres-docker.env" up -d --build postgres api
+docker compose --env-file "$HOME\postgres-docker.env" ps
+```
+
+Confirme que `postgres` está saudável. Depois, remova somente o container antigo
+(sem `-v`, que apagaria o volume) para ele não tentar reiniciar junto com o novo:
+
+```powershell
+docker rm compra-livre-postgres
+```
+
+Se a subida falhar antes disso, mantenha o container antigo e retome-o com
+`docker start compra-livre-postgres`. Teste a API em `http://localhost:8000`.
+As cargas são executadas sob demanda, sem iniciar junto com a API. Exemplo:
+
+```powershell
+docker compose --env-file "$HOME\postgres-docker.env" --profile jobs run --rm pipeline full --data-inicio AAAA-MM-DD --data-fim AAAA-MM-DD --pular-enriquecimento
+```
+
+O comando usa o schema que já foi aplicado no banco. Não execute a carga até
+definir e validar o intervalo necessário para a plataforma.
+
 ## 6. Instalação do banco
 
 Rode o `db/schema.sql` no seu projeto Supabase (SQL Editor do painel, ou via
 `psql "$DATABASE_URL" -f db/schema.sql`). Ele cria o schema `compra_livre` e
-todas as tabelas. Pode ser rodado de novo sem erro — todos os `CREATE TABLE`
-usam `IF NOT EXISTS`.
+todas as tabelas. O script também aplica alterações compatíveis e idempotentes
+ao schema existente; rode-o novamente antes de atualizar o pipeline/API.
 
 No SQL Editor do Supabase, crie a query pelo **+** (seção PRIVATE). Queries
 criadas na seção LOGS rodam em outro motor e dão erro ("Only singular query
@@ -175,14 +208,40 @@ Nunca rode no banco de produção. Para remover depois:
 
 ## 7. Execução
 
-**Full load** (primeira carga ou substituição completa dos fatos de cada
-município processado):
+**Carga progressiva** (coleta todos os municípios no período; cada município
+é publicado assim que suas duas fontes terminam):
 
 ```bash
-python -m src.main full --data-inicio 2026-01-01 --data-fim 2026-08-20
+python -m src.main full --data-inicio 2000-01-01 --data-fim 2026-10-15 --pular-enriquecimento
 ```
 
-Processa todos os municípios do Ceará no período informado.
+As consultas de cobertura encontraram itens desde 2000 em Fortaleza e até a
+data de execução; isso é uma sondagem de disponibilidade, não uma prova de
+que não existam registros anteriores. Ajuste as datas conforme o escopo
+validado. A carga aplica upserts; fatos de outros períodos e municípios não
+são removidos. O parâmetro `--pular-enriquecimento` separa as consultas ao
+OpenCNPJ da publicação dos fatos TCE. Cada município é publicado após suas
+duas fontes terminarem; acompanhe o progresso nos logs e checkpoints.
+
+Para carregar somente municípios cujo nome começa com uma letra, informe
+`--inicial`. A comparação ignora maiúsculas/minúsculas e acentos (por exemplo,
+`A` também seleciona nomes iniciados por `Á`). A dimensão de municípios ainda
+é atualizada com a lista oficial completa; apenas a extração dos fatos fica
+limitada aos municípios selecionados:
+
+```bash
+python -m src.main full --data-inicio AAAA-MM-DD --data-fim AAAA-MM-DD --inicial A --pular-enriquecimento
+```
+
+Depois da carga, enriqueça apenas empresas presentes nos itens do período:
+
+```bash
+python -m src.main enriquecer --data-inicio 2025-01-01 --data-fim 2025-12-31
+```
+
+O enriquecimento limitado por período consulta somente CNPJs associados a
+itens já publicados nesse intervalo. Sem datas, `enriquecer` mantém o modo
+global para recuperar todos os CNPJs pendentes da dimensão.
 
 **Incremental** (carga do dia a dia, pensada para rodar agendada):
 
@@ -196,30 +255,26 @@ carga de itens, participantes ou empresas:
 ```bash
 python -m src.main dotacoes --data-inicio 2025-01-01 --data-fim 2026-12-31
 ```
-**Histórico PNCP** (a UF vem de `UF_ALVO` e as modalidades de
-`PNCP_MODALIDADES`, separadas por vírgula):
+
+Para tentar novamente o enriquecimento de empresas pendentes sem recolher os
+dados do TCE-CE:
 
 ```bash
-python -m src.main pncp-historico --data-inicio 2026-01-01 --data-fim 2026-09-30
+python -m src.main enriquecer
 ```
 
-**Incremental PNCP** (edital com proposta aberta e alterações recentes):
+**Reprocessamento direcionado** (atualiza os fatos apenas para um município e
+período, preservando os fatos fora do intervalo):
 
 ```bash
-python -m src.main pncp-incremental --dias 7
+python -m src.main reprocessar --codigo-municipio 013 --data-inicio 2023-01-01 --data-fim 2026-08-20
+python -m src.main reprocessar --codigo-municipio 026 --data-inicio 2026-01-01 --data-fim 2026-08-20
 ```
 
-O `PNCP_PAGE_SIZE` é limitado ao intervalo oficial de 10 a 50. O padrão de
-`PNCP_MODALIDADES` é `8,9` (dispensa e inexigibilidade); ajuste-o ao escopo
-comercial. A retomada grava em `ultimo_start_index` a última página concluída,
-e recomeça pela seguinte.
-
-Na versão atual do Swagger de consulta PNCP, não aparece uma operação
-separada para itens nem o DTO de detalhe declara esse campo. O cliente usa a
-consulta de detalhe documentada e carrega itens quando vierem embutidos; sem
-uma operação oficial adicional, o matching continua usando o objeto da
-contratação. Os códigos padrão 8 e 9 são configuráveis, pois o Swagger não
-publica enumeração de modalidades.
+Use este comando para recuperar uma carga municipal com erro ou atualizar um
+período específico. Diferentemente de `full`, ele não apaga fatos de outros
+municípios nem de outros períodos. O comando consulta novamente o TCE-CE e
+grava os itens e seus agregados no banco.
 
 A carga grava uma linha por dotação em `fato_dotacao_licitacao`. Os sete
 códigos de natureza cadastrados ficam em `dim_natureza_despesa`; códigos de
@@ -228,17 +283,22 @@ elemento que não pertencem a esse catálogo são preservados com
 
 Carrega só os últimos N dias (padrão 7).
 
-O full load limpa os fatos do município somente depois que a extração daquele
-município termina e então os reconstrói a partir do período solicitado. O
-incremental preserva o histórico e faz upsert apenas dos dados da janela.
-O staging é limpo após a transformação; ele não é um arquivo histórico bruto.
+O full load e o incremental preservam os fatos existentes e fazem upsert dos
+registros recebidos. Os fatos são publicados antes do enriquecimento; se o
+OpenCNPJ falhar, o comando termina com erro, mas os fatos TCE continuam
+disponíveis e empresas não verificadas continuam excluídas das rotas de ME.
+Falhas individuais do OpenCNPJ também deixam o comando em estado de erro;
+use `enriquecer` para tentar novamente somente as empresas pendentes. Ambos os
+comandos de carga aceitam `--pular-enriquecimento` para desacoplar essa etapa.
+O staging contém dados já normalizados. Full e incremental preservam essas
+linhas para rastreabilidade e retomada; não é um arquivo histórico bruto.
 
 ### Retomada automática
 
-Se o processo cair no meio de uma paginação (queda de rede, etc.), a tabela
-`pipeline_execucoes` guarda o último `start_index` associado à mesma fonte,
-modo, município e período. Uma carga com outro período nunca reutiliza
-acidentalmente esse checkpoint.
+Se o processo cair ou uma página falhar, a tabela `pipeline_execucoes` guarda
+o último `start_index` confirmado. Uma nova tentativa retoma somente uma
+execução com a mesma fonte, modo, município e período; parâmetros diferentes
+nunca reutilizam esse checkpoint.
 
 ## 8. Cache de CNPJ
 
@@ -253,6 +313,33 @@ afetados e termina o enriquecimento do lote. Depois do período indicado pela
 API, execute novamente o comando; os CNPJs ainda não enriquecidos continuarão
 pendentes. Evite executar duas cargas simultâneas, pois isso aumenta o
 rate limit.
+
+### Elegibilidade de microempresa
+
+Para a regra de elegibilidade do Compra Livre, somente é ME a empresa cujo
+registro Receita retornado pelo OpenCNPJ tenha `porte_empresa` igual a
+`Microempresa (ME)` (ou um alias já aceito), `opcao_mei = "N"`, CNPJ numérico
+de 14 dígitos, consulta encontrada e recente dentro de
+`OPENCNPJ_DIAS_VALIDADE_CACHE`, além de `updated_at` presente e válido.
+`Empresa de Pequeno Porte (EPP)`, `opcao_mei = "S"`, valores vazios ou
+desconhecidos não são elegíveis. MEI e EPP não são tratados como sinônimos de
+ME.
+
+O staging, `dim_empresa` e as tabelas fato continuam preservando os dados de
+origem e todos os itens/valores necessários às análises do total das
+licitações. A API aplica a regra em todas as rotas que retornam empresas e
+participações; os totais gerais de licitação permanecem completos. Assim,
+falhas de enriquecimento, classificações desconhecidas, caches vencidos e
+alterações de porte não resultam em exposição como ME.
+
+`consultado_em` registra quando o pipeline consultou o OpenCNPJ;
+`fonte_atualizada_em` registra o `updated_at` da base Receita publicada pelo
+OpenCNPJ. O segundo valor é preservado para rastreabilidade, mas não há
+histórico de porte na fonte consumida: participações antigas refletem o porte
+consultado mais recentemente, não necessariamente o porte da empresa na data
+da licitação. Ao aplicar o `db/schema.sql`, caches antigos sem os campos novos
+são marcados para nova consulta; a primeira carga posterior os reprocessa sem
+apagar o cadastro ou os fatos existentes.
 
 ## 9. Testes
 
@@ -324,14 +411,24 @@ As tabelas prontas para consumo são:
 - `fato_licitacao`: uma linha por licitação, com valor total e contagem de empresas/itens.
 - `dim_natureza_despesa`: catálogo extensível das naturezas de despesa.
 - `fato_dotacao_licitacao`: dotações do TCE relacionadas por município e número da licitação.
-- `fato_participacao_empresa`: uma linha por empresa por licitação, já com o valor somado — a mais indicada para as análises de ME/EPP.
+- `fato_participacao_empresa`: uma linha por empresa por licitação, já com o valor somado — a fonte para análises por porte.
 - `dim_empresa`: dados cadastrais e porte de cada empresa.
 - `dim_municipio`: nome e UF de cada município.
-- `pncp_contratacao` e `pncp_item`: editais e itens publicados no PNCP.
-- `perfil_cliente`: palavras-chave e área de atuação mantidas pelo backend.
-- `pncp_match`: compatibilidades novas ou recalculadas após atualização do edital.
 
 Todas ficam no schema `compra_livre` do Postgres do Supabase.
+
+As rotas que retornam registros de empresa usam a mesma regra estrita de
+elegibilidade ME baseada em `dim_empresa`; empresas sem porte verificável não
+são retornadas por essas rotas. A rota `/licitacoes` continua apresentando
+totais da contratação sem divulgar empresas, preservando valores e contagens
+gerais.
+
+Itens sem CPF/CNPJ identificável são preservados em `fato_item_licitacao` com
+`cnpj = null`; seus valores e quantidades entram no total da licitação, mas
+eles não são atribuídos a nenhuma empresa nem entram em `fato_participacao_empresa`.
+Esses itens permanecem nos totais do universo e na categoria desconhecida do
+comparativo analítico; a rota de itens destinada ao dashboard retorna apenas
+empresas ME elegíveis.
 
 ## 14. API para o Full Stack
 
@@ -352,12 +449,6 @@ Documentação interativa:
 http://localhost:8000/docs
 ```
 
-As rotas PNCP somente leitura são `GET /editais-pncp`,
-`GET /editais-pncp/{numero_controle_pncp}` (inclui itens),
-`GET /editais-pncp/matches?criado_desde=...` e
-`GET /empresas/{cnpj}/editais-compativeis`. O backend consumidor controla quais
-matches já notificou.
-
 Durante o desenvolvimento, CORS permite requisições GET de frontends em
 `localhost:3000` e `localhost:5173`. Em produção, altere essa lista para o
 domínio real do dashboard antes de publicar a API.
@@ -374,6 +465,7 @@ GET /participacoes
 GET /empresas
 GET /analytics/gastos-por-natureza
 GET /analytics/microempresas
+GET /analytics/comparativo-classificacao
 GET /analytics/participacao-me-por-natureza
 GET /analytics/licitacoes-detalhadas
 GET /analytics/participacoes-me-locais
@@ -404,6 +496,11 @@ Indicadores analíticos:
 - `/analytics/microempresas` consolida empresas ME vencedoras, licitações,
   participações, itens e valor vencido, com filtros de município, natureza e
   período.
+- `/analytics/comparativo-classificacao` compara quantidade e valor de itens
+  e licitações no universo com as categorias ME, MEI, EPP, demais e
+  desconhecida. A classificação só é considerada conhecida quando o cadastro
+  OpenCNPJ está encontrado, enriquecido e atual; itens sem CNPJ e empresas sem
+  classificação confiável ficam em `DESCONHECIDA`. Aceita município e período.
 - `/analytics/participacao-me-por-natureza` retorna os percentuais de
   licitações, participações, valor vencido e itens vencidos relacionados a
   microempresas. Como o TCE não relaciona diretamente cada item à natureza,
@@ -620,5 +717,11 @@ de pagamentos e da referência cadastral, para a tela deixar isso explícito.
 - **Porte é o atual, não o de 2025** — o OpenCNPJ informa o porte de hoje e não a edição da base; a referência fica `NAO_INFORMADA`. Para comparação histórica do subtotal ME é preciso a mesma referência cadastral do levantamento original.
 - **Paginação do TCE** — mitigada com releituras (seção 15). Um registro que a API nunca devolve, mas troca por cópia de outro, é indistinguível de duplicação na origem; a garantia final é a conferência com o portal.
 - **Sem testes de integração reais contra o Supabase** — o ambiente onde este código foi gerado só tem acesso de rede a repositórios de pacotes (PyPI, npm, GitHub), não ao Supabase nem às APIs do TCE-CE/OpenCNPJ. O código foi revisado, testado unitariamente (com mocks) e teve todos os módulos importados sem erro, mas a validação final contra as APIs e o banco reais só foi possível rodando do ambiente do Levi (foi assim, inclusive, que a questão do `codigo_municipio` — ver seção 3 — foi descoberta e corrigida).
+- **CNPJ alfanumérico ainda não é processado** — a API OpenCNPJ documenta suporte a
+  CNPJ alfanumérico, mas a normalização, o cache e a validação atuais do pipeline
+  trabalham com CNPJ numérico. Esses registros não são elegíveis até uma etapa
+  específica de suporte ser implementada.
+- **Sem testes de integração contra Supabase ou OpenCNPJ** — os testes do projeto usam mocks e nenhuma carga foi executada nesta auditoria. A lista pública do TCE foi consultada em modo somente leitura; isso não valida paginação, cobertura histórica nem os demais endpoints em uma execução local.
 - **Datas do TCE-CE**: a documentação não fixa o formato exato de `data_realizacao_licitacao` nos retornos. `normalize.py` tenta os formatos mais comuns (ISO e dd/mm/aaaa); se a API usar outro formato, o campo fica `NULL` em vez de quebrar a carga — vale conferir os logs de warning na primeira execução real.
+- **Lista de municípios do TCE** — a rota consultada é `sim/municipios`, que respondeu com o conjunto `dv_municipios`; o caminho separado `sim/dv_municipios` retornou 404. A disponibilidade dessa lista foi verificada, mas cobertura completa, paginação e estabilidade devem ser confirmadas na primeira carga controlada.
 - **`sim/dv_municipios` não é documentado oficialmente** — foi encontrado testando a API e confirmado com dados reais (retornou os 184 municípios do Ceará corretamente), mas, como não está no PDF de documentação original, pode mudar de comportamento sem aviso. Se ele parar de funcionar, o pipeline vai falhar logo no início (na carga de `dim_municipio`), o que é mais seguro do que falhar silenciosamente como acontecia antes com o código IBGE errado.

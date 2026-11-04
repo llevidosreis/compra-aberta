@@ -12,6 +12,10 @@ from pydantic import BaseModel
 
 from src.config import carregar_config_banco
 from src.db import conexao
+from src.eligibility import (
+    sql_empresa_fonte_confiavel,
+    sql_empresa_me_elegivel,
+)
 
 app = FastAPI(
     title="Compra Aberta API",
@@ -93,7 +97,7 @@ class ItemLicitacao(BaseModel):
     codigo_municipio: str
     numero_licitacao: str
     numero_sequencial_item_licitacao: int
-    cnpj: str
+    cnpj: str | None = None
     razao_social: str | None = None
     porte_empresa: str | None = None
     descricao_item_licitacao: str | None = None
@@ -144,47 +148,6 @@ class EmpresasResponse(Paginacao):
     data: list[Empresa]
 
 
-class EditalPNCP(BaseModel):
-    numero_compra: str | None = None
-    numero_controle_pncp: str
-    modalidade_nome: str | None = None
-    data_atualizacao: str | None = None
-    orgao_razao_social: str | None = None
-    nome_municipio: str | None = None
-    uf: str | None = None
-    objeto_compra: str
-    link_edital_pncp: str | None = None
-
-
-class ItemPNCP(BaseModel):
-    numero_item: str
-    descricao: str | None = None
-    quantidade: str | None = None
-    unidade: str | None = None
-    valor_estimado: str | None = None
-    codigo_catalogo: str | None = None
-    categoria_catalogo: str | None = None
-
-
-class EditaisPNCPResponse(Paginacao):
-    data: list[EditalPNCP]
-
-
-class EditalPNCPDetalhe(EditalPNCP):
-    itens: list[ItemPNCP]
-
-
-class MatchPNCP(EditalPNCP):
-    cnpj: str
-    score: str
-    motivos: dict[str, Any]
-    criado_em: str
-
-
-class MatchesPNCPResponse(Paginacao):
-    data: list[MatchPNCP]
-
-
 class GastoPorNatureza(BaseModel):
     codigo_natureza: str
     nome_natureza: str
@@ -210,6 +173,24 @@ class IndicadorMicroempresas(BaseModel):
 class MicroempresasResponse(BaseModel):
     data: IndicadorMicroempresas
     porte_considerado: list[str]
+
+
+class UniversoItens(BaseModel):
+    quantidade_itens: int
+    quantidade_licitacoes: int
+    valor_total: str
+
+
+class ItensPorClassificacao(BaseModel):
+    classificacao: str
+    quantidade_itens: int
+    quantidade_licitacoes: int
+    valor_total: str
+
+
+class ComparativoClassificacaoResponse(BaseModel):
+    universo: UniversoItens
+    por_classificacao: list[ItensPorClassificacao]
 
 
 class ParticipacaoMePorNatureza(BaseModel):
@@ -349,11 +330,11 @@ def _filtros_data(
 
 
 def _porte_microempresa_sql(alias: str) -> str:
-    return f"""
-        LOWER(TRIM(COALESCE({alias}.porte_empresa, ''))) IN (
-            'me', 'microempresa', 'microempresa (me)'
-        )
-    """
+    config = carregar_config_banco()
+    return sql_empresa_me_elegivel(
+        alias,
+        config.opencnpj_dias_validade_cache,
+    )
 
 
 def _validar_codigo_natureza(codigo_natureza: str | None) -> None:
@@ -505,7 +486,7 @@ def itens_licitacao(
     offset: int = Query(default=0, ge=0),
 ) -> dict[str, Any]:
     rows = _linhas(
-        """
+        f"""
         SELECT i.id, i.codigo_municipio, i.numero_licitacao,
                i.numero_sequencial_item_licitacao, i.cnpj,
                e.razao_social, e.porte_empresa,
@@ -516,6 +497,7 @@ def itens_licitacao(
         LEFT JOIN compra_livre.dim_empresa e ON e.cnpj = i.cnpj
         WHERE i.codigo_municipio = %s
           AND i.numero_licitacao = %s
+          AND {_porte_microempresa_sql("e")}
         ORDER BY i.numero_sequencial_item_licitacao, i.id
         LIMIT %s OFFSET %s
         """,
@@ -534,6 +516,7 @@ def participacoes(
 ) -> dict[str, Any]:
     filtros: list[str] = []
     valores: list[Any] = []
+    filtros.append(_porte_microempresa_sql("e"))
     if codigo_municipio:
         filtros.append("p.codigo_municipio = %s")
         valores.append(codigo_municipio)
@@ -575,7 +558,7 @@ def empresas(
     limit: int = Query(default=50, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
 ) -> dict[str, Any]:
-    filtros: list[str] = []
+    filtros: list[str] = [_porte_microempresa_sql("e")]
     valores: list[Any] = []
     if porte_empresa:
         filtros.append("porte_empresa = %s")
@@ -591,7 +574,7 @@ def empresas(
                cnae_principal, porte_empresa, uf_empresa,
                municipio_empresa, encontrado_opencnpj,
                consultado_em, atualizado_em
-        FROM compra_livre.dim_empresa
+        FROM compra_livre.dim_empresa e
         {where}
         ORDER BY razao_social NULLS LAST, cnpj
         LIMIT %s OFFSET %s
@@ -645,6 +628,7 @@ def licitacoes_detalhadas(
                    e.municipio_empresa, e.uf_empresa
             FROM compra_livre.fato_participacao_empresa p
             JOIN compra_livre.dim_empresa e ON e.cnpj = p.cnpj
+            WHERE {_porte_microempresa_sql("e")}
         )
         SELECT f.codigo_municipio, m.nome AS municipio,
                f.numero_licitacao,
@@ -992,6 +976,124 @@ def indicador_microempresas(
         tuple(valores),
     )
     return {"data": rows[0], "porte_considerado": ["ME", "Microempresa", "Microempresa (ME)"]}
+
+
+@app.get(
+    "/analytics/comparativo-classificacao",
+    response_model=ComparativoClassificacaoResponse,
+    tags=["indicadores"],
+)
+def comparativo_classificacao(
+    codigo_municipio: str | None = Query(default=None, max_length=20),
+    data_inicio: date | None = None,
+    data_fim: date | None = None,
+) -> dict[str, Any]:
+    """Compara vencedores ME com demais portes e empresas sem classificação.
+
+    O universo total inclui todos os itens persistidos, também sem CNPJ.
+    Classificações não verificáveis ou desatualizadas ficam como desconhecidas.
+    """
+    _validar_periodo(data_inicio, data_fim)
+    filtros, valores = _filtros_data("i", data_inicio, data_fim)
+    if codigo_municipio:
+        filtros.append("i.codigo_municipio = %s")
+        valores.append(codigo_municipio)
+    where = f"WHERE {' AND '.join(filtros)}" if filtros else ""
+    confiavel = sql_empresa_fonte_confiavel(
+        "e",
+        carregar_config_banco().opencnpj_dias_validade_cache,
+    )
+    rows = _linhas(
+        f"""
+        WITH base AS (
+            SELECT i.codigo_municipio, i.numero_licitacao,
+                   i.valor_vencedor,
+                   CASE
+                       WHEN e.cnpj IS NULL THEN 'DESCONHECIDA'
+                       WHEN {confiavel}
+                            AND UPPER(TRIM(COALESCE(e.opcao_mei, ''))) = 'N'
+                            AND LOWER(TRIM(COALESCE(e.porte_empresa, '')))
+                                IN ('me', 'microempresa', 'microempresa (me)')
+                           THEN 'ME'
+                       WHEN {confiavel}
+                            AND LOWER(TRIM(COALESCE(e.porte_empresa, '')))
+                                IN ('me', 'microempresa', 'microempresa (me)')
+                            AND UPPER(TRIM(COALESCE(e.opcao_mei, ''))) = 'S'
+                           THEN 'MEI'
+                       WHEN {confiavel}
+                            AND LOWER(TRIM(COALESCE(e.porte_empresa, '')))
+                                IN ('epp', 'empresa de pequeno porte',
+                                    'empresa de pequeno porte (epp)')
+                           THEN 'EPP'
+                       WHEN {confiavel}
+                            AND LOWER(TRIM(COALESCE(e.porte_empresa, '')))
+                                IN ('demais')
+                           THEN 'OUTRO'
+                       ELSE 'DESCONHECIDA'
+                   END AS classificacao
+            FROM compra_livre.fato_item_licitacao i
+            LEFT JOIN compra_livre.dim_empresa e ON e.cnpj = i.cnpj
+            {where}
+        ),
+        universo AS (
+            SELECT COUNT(*) AS quantidade_itens,
+                   COUNT(DISTINCT (codigo_municipio, numero_licitacao))
+                       AS quantidade_licitacoes,
+                   COALESCE(SUM(valor_vencedor), 0) AS valor_total
+            FROM base
+        ),
+        agrupados AS (
+            SELECT classificacao,
+                   COUNT(*) AS quantidade_itens,
+                   COUNT(DISTINCT (codigo_municipio, numero_licitacao))
+                       AS quantidade_licitacoes,
+                   COALESCE(SUM(valor_vencedor), 0) AS valor_total
+            FROM base
+            GROUP BY classificacao
+        ),
+        categorias(classificacao, ordem) AS (
+            VALUES ('ME', 1), ('MEI', 2), ('EPP', 3), ('OUTRO', 4),
+                   ('DESCONHECIDA', 5)
+        )
+        SELECT u.quantidade_itens AS total_itens,
+               u.quantidade_licitacoes AS total_licitacoes,
+               u.valor_total AS valor_total_universo,
+               c.classificacao,
+               COALESCE(a.quantidade_itens, 0) AS quantidade_itens,
+               COALESCE(a.quantidade_licitacoes, 0) AS quantidade_licitacoes,
+               COALESCE(a.valor_total, 0) AS valor_total
+        FROM categorias c
+        LEFT JOIN agrupados a USING (classificacao)
+        CROSS JOIN universo u
+        ORDER BY c.ordem
+        """,
+        tuple(valores),
+    )
+    if not rows:
+        return {
+            "universo": {
+                "quantidade_itens": 0,
+                "quantidade_licitacoes": 0,
+                "valor_total": "0",
+            },
+            "por_classificacao": [],
+        }
+    return {
+        "universo": {
+            "quantidade_itens": rows[0]["total_itens"],
+            "quantidade_licitacoes": rows[0]["total_licitacoes"],
+            "valor_total": rows[0]["valor_total_universo"],
+        },
+        "por_classificacao": [
+            {
+                "classificacao": row["classificacao"],
+                "quantidade_itens": row["quantidade_itens"],
+                "quantidade_licitacoes": row["quantidade_licitacoes"],
+                "valor_total": row["valor_total"],
+            }
+            for row in rows
+        ],
+    }
 
 
 @app.get(
@@ -1358,132 +1460,3 @@ def pagamentos_fornecedores(
 @app.get("/")
 def read_root():
     return {"message": "API Compra Aberta está no ar! Acesse /docs para a documentação."}
-
-
-
-
-
-@app.get("/editais-pncp", response_model=EditaisPNCPResponse, tags=["PNCP"])
-def editais_pncp(
-    uf: str | None = Query(default=None, min_length=2, max_length=2),
-    codigo_municipio: str | None = Query(default=None, max_length=20),
-    modalidade: int | None = None,
-    somente_abertos: bool = False,
-    atualizado_desde: date | None = None,
-    data_inicio: date | None = None,
-    data_fim: date | None = None,
-    limit: int = Query(default=50, ge=1, le=100),
-    offset: int = Query(default=0, ge=0),
-) -> dict[str, Any]:
-    """Lista contratações PNCP e filtra período pela última atualização disponível."""
-    _validar_periodo(data_inicio, data_fim)
-    filtros: list[str] = []
-    valores: list[Any] = []
-    for expressao, valor in (
-        ("uf = %s", uf.upper() if uf else None),
-        ("codigo_municipio = %s", codigo_municipio),
-        ("modalidade_codigo = %s", modalidade),
-    ):
-        if valor is not None:
-            filtros.append(expressao)
-            valores.append(valor)
-    if atualizado_desde:
-        filtros.append("data_atualizacao >= %s")
-        valores.append(atualizado_desde)
-    if data_inicio:
-        filtros.append("data_publicacao >= %s")
-        valores.append(data_inicio)
-    if data_fim:
-        filtros.append("data_publicacao < %s + INTERVAL '1 day'")
-        valores.append(data_fim)
-    if somente_abertos:
-        filtros.extend([
-            "data_abertura_proposta <= now()",
-            "data_encerramento_proposta > now()",
-        ])
-    where = f"WHERE {' AND '.join(filtros)}" if filtros else ""
-    valores.extend([limit, offset])
-    rows = _linhas(
-        f"""SELECT numero_controle_pncp, numero_compra, modalidade_nome,
-                   data_atualizacao, orgao_razao_social, nome_municipio, uf,
-                   objeto_compra, link_edital_pncp
-            FROM compra_livre.pncp_contratacao
-            {where}
-            ORDER BY data_atualizacao DESC NULLS LAST, numero_controle_pncp
-            LIMIT %s OFFSET %s""",
-        tuple(valores),
-    )
-    return {"data": rows, "limit": limit, "offset": offset}
-
-
-@app.get("/editais-pncp/matches", response_model=MatchesPNCPResponse, tags=["PNCP"])
-def matches_pncp(
-    criado_desde: date | None = None,
-    limit: int = Query(default=50, ge=1, le=100),
-    offset: int = Query(default=0, ge=0),
-) -> dict[str, Any]:
-    filtros = ["m.criado_em >= %s"] if criado_desde else []
-    valores: list[Any] = [criado_desde] if criado_desde else []
-    where = f"WHERE {' AND '.join(filtros)}" if filtros else ""
-    valores.extend([limit, offset])
-    rows = _linhas(
-        f"""SELECT m.numero_controle_pncp, m.cnpj, m.score, m.motivos,
-                   m.criado_em, c.numero_compra, c.modalidade_nome,
-                   c.data_atualizacao, c.orgao_razao_social, c.nome_municipio,
-                   c.uf, c.objeto_compra, c.link_edital_pncp
-            FROM compra_livre.pncp_match m
-            JOIN compra_livre.pncp_contratacao c
-              ON c.numero_controle_pncp = m.numero_controle_pncp
-            {where}
-            ORDER BY m.criado_em, m.numero_controle_pncp, m.cnpj
-            LIMIT %s OFFSET %s""",
-        tuple(valores),
-    )
-    return {"data": rows, "limit": limit, "offset": offset}
-
-
-@app.get("/editais-pncp/{numero_controle_pncp}", response_model=EditalPNCPDetalhe, tags=["PNCP"])
-def detalhe_edital_pncp(numero_controle_pncp: str) -> dict[str, Any]:
-    rows = _linhas(
-        """SELECT numero_compra, numero_controle_pncp, modalidade_nome,
-                  data_atualizacao, orgao_razao_social, nome_municipio, uf,
-                  objeto_compra, link_edital_pncp
-           FROM compra_livre.pncp_contratacao
-           WHERE numero_controle_pncp = %s""",
-        (numero_controle_pncp,),
-    )
-    if not rows:
-        raise HTTPException(status_code=404, detail="Edital PNCP não encontrado")
-    itens = _linhas(
-        """SELECT numero_item, descricao, quantidade, unidade, valor_estimado,
-                  codigo_catalogo, categoria_catalogo
-           FROM compra_livre.pncp_item
-           WHERE numero_controle_pncp = %s
-           ORDER BY numero_item""",
-        (numero_controle_pncp,),
-    )
-    return {**rows[0], "itens": itens}
-
-
-@app.get("/empresas/{cnpj}/editais-compativeis", response_model=MatchesPNCPResponse, tags=["PNCP", "empresas"])
-def editais_compativeis_empresa(
-    cnpj: str,
-    limit: int = Query(default=50, ge=1, le=100),
-    offset: int = Query(default=0, ge=0),
-) -> dict[str, Any]:
-    documento = "".join(ch for ch in cnpj if ch.isdigit())
-    if len(documento) != 14:
-        raise HTTPException(status_code=400, detail="cnpj deve conter 14 dígitos")
-    rows = _linhas(
-        """SELECT c.numero_compra, c.numero_controle_pncp, c.modalidade_nome,
-                  c.data_atualizacao, c.orgao_razao_social, c.nome_municipio,
-                  c.uf, c.objeto_compra, c.link_edital_pncp, m.score, m.motivos
-           FROM compra_livre.pncp_match m
-           JOIN compra_livre.pncp_contratacao c
-             ON c.numero_controle_pncp = m.numero_controle_pncp
-           WHERE m.cnpj = %s
-           ORDER BY c.data_atualizacao DESC NULLS LAST, m.score DESC
-           LIMIT %s OFFSET %s""",
-        (documento, limit, offset),
-    )
-    return {"data": rows, "limit": limit, "offset": offset}

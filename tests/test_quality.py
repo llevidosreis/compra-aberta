@@ -45,6 +45,35 @@ def test_validar_itens_rejeita_valor_negativo():
     assert "negativo" in resultado.invalidos[0][1]
 
 
+def test_validar_itens_rejeita_valor_vencedor_que_falhou_na_normalizacao():
+    registro = _item_valido(
+        valor_vencedor_item_licitacao=None,
+        _erros_normalizacao={
+            "valor_vencedor_item_licitacao": {
+                "motivo": "valor_vencedor_item_licitacao com valor numerico invalido",
+                "valor_original": "'NaN'",
+            }
+        },
+    )
+
+    resultado = validar_itens([registro])
+
+    assert resultado.validos == []
+    assert resultado.invalidos == [
+        (registro, "valor_vencedor_item_licitacao com valor numerico invalido")
+    ]
+
+
+def test_validar_itens_aceita_valor_vencedor_zero_ou_ausente_sem_erro_de_parse():
+    resultado = validar_itens([
+        _item_valido(valor_vencedor_item_licitacao=0),
+        _item_valido(numero_sequencial_item_licitacao=2, valor_vencedor_item_licitacao=None),
+    ])
+
+    assert len(resultado.validos) == 2
+    assert resultado.invalidos == []
+
+
 def test_validar_itens_rejeita_sequencia_ausente():
     resultado = validar_itens([_item_valido(numero_sequencial_item_licitacao=None)])
     assert len(resultado.invalidos) == 1
@@ -54,3 +83,17 @@ def test_validar_itens_rejeita_sequencia_ausente():
 def test_validar_itens_aceita_registro_completo():
     resultado = validar_itens([_item_valido()])
     assert len(resultado.validos) == 1
+
+
+def test_validar_itens_preserva_item_sem_fornecedor_identificado():
+    resultado = validar_itens([
+        _item_valido(numero_documento_negociante=None),
+        _item_valido(numero_documento_negociante="DOCUMENTO_INVALIDO"),
+    ])
+
+    assert len(resultado.validos) == 2
+    assert [item["numero_documento_negociante"] for item in resultado.validos] == [
+        None,
+        None,
+    ]
+    assert resultado.invalidos == []

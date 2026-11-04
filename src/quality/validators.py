@@ -34,7 +34,18 @@ def validar_licitantes(registros: list[dict[str, Any]]) -> ResultadoValidacao:
 def validar_itens(registros: list[dict[str, Any]]) -> ResultadoValidacao:
     resultado = ResultadoValidacao()
     for registro in registros:
-        motivo = _motivo_invalido_comum(registro)
+        motivo = None
+        erros_normalizacao = registro.get("_erros_normalizacao") or {}
+        erro_sequencial = erros_normalizacao.get("numero_sequencial_item_licitacao")
+        erro_valor_vencedor = erros_normalizacao.get("valor_vencedor_item_licitacao")
+        if erro_sequencial:
+            motivo = erro_sequencial["motivo"]
+        elif erro_valor_vencedor:
+            motivo = erro_valor_vencedor["motivo"]
+        elif not registro.get("codigo_municipio"):
+            motivo = "codigo_municipio ausente"
+        elif not registro.get("numero_licitacao"):
+            motivo = "numero_licitacao ausente"
         if not motivo and registro.get("numero_sequencial_item_licitacao") is None:
             motivo = "numero_sequencial_item_licitacao ausente"
         if not motivo and registro.get("valor_vencedor_item_licitacao") is not None and registro["valor_vencedor_item_licitacao"] < 0:
@@ -43,33 +54,11 @@ def validar_itens(registros: list[dict[str, Any]]) -> ResultadoValidacao:
         if motivo:
             resultado.invalidos.append((registro, motivo))
         else:
-            resultado.validos.append(registro)
-    return resultado
-
-def validar_contratacoes_pncp(registros: list[dict[str, Any]]) -> ResultadoValidacao:
-    resultado = ResultadoValidacao()
-    for registro in registros:
-        motivo = None
-        if not registro.get("numero_controle_pncp"):
-            motivo = "numero_controle_pncp ausente"
-        elif len(registro.get("orgao_cnpj") or "") != 14:
-            motivo = "orgao_cnpj deve conter 14 dígitos"
-        elif not str(registro.get("objeto_compra") or "").strip():
-            motivo = "objeto_compra vazio"
-
-        if motivo:
-            resultado.invalidos.append((registro, motivo))
-        else:
-            resultado.validos.append(registro)
-    return resultado
-
-
-def validar_itens_pncp(registros: list[dict[str, Any]]) -> ResultadoValidacao:
-    resultado = ResultadoValidacao()
-    for registro in registros:
-        if registro.get("numero_item") in (None, ""):
-            resultado.invalidos.append((registro, "numero_item ausente"))
-        else:
+            documento = registro.get("numero_documento_negociante")
+            if documento and (
+                not str(documento).isdigit() or len(str(documento)) not in (11, 14)
+            ):
+                registro = {**registro, "numero_documento_negociante": None}
             resultado.validos.append(registro)
     return resultado
 

@@ -46,7 +46,10 @@ def upsert_staging_itens(conn, registros: list[dict]) -> None:
             data_referencia_doc
         )
         VALUES %s
-        ON CONFLICT (codigo_municipio, numero_licitacao, numero_sequencial_item_licitacao, numero_documento_negociante)
+        ON CONFLICT (
+            codigo_municipio, numero_licitacao, numero_sequencial_item_licitacao,
+            (COALESCE(numero_documento_negociante, ''))
+        )
         DO UPDATE SET
             descricao_item_licitacao = EXCLUDED.descricao_item_licitacao,
             valor_vencedor_item_licitacao = EXCLUDED.valor_vencedor_item_licitacao,
@@ -95,4 +98,18 @@ def limpar_staging_itens(conn, codigo_municipio: str) -> None:
         cursor.execute(
             "DELETE FROM compra_livre.stg_item_licitacao WHERE codigo_municipio = %s",
             (codigo_municipio,),
+        )
+
+
+def limpar_staging_itens_periodo(
+    conn, codigo_municipio: str, data_inicio: str, data_fim: str
+) -> None:
+    with conn.cursor() as cursor:
+        cursor.execute(
+            """
+            DELETE FROM compra_livre.stg_item_licitacao
+            WHERE codigo_municipio = %s
+              AND data_realizacao_licitacao BETWEEN %s AND %s
+            """,
+            (codigo_municipio, data_inicio, data_fim),
         )

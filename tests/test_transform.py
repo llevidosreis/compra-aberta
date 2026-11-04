@@ -1,3 +1,5 @@
+from decimal import Decimal
+
 from src.transform.deduplicate import deduplicar_por_chave
 from src.transform.normalize import limpar_cnpj, normalizar_item, normalizar_licitante, para_data, para_numero
 from src.transform.naturezas import codigo_natureza
@@ -26,8 +28,42 @@ def test_para_data_invalida_retorna_none():
     assert para_data("data-quebrada") is None
 
 
+def test_item_preserva_diagnosticos_de_data_e_numero_invalidos():
+    resultado = normalizar_item({
+        "codigo_municipio": "010",
+        "numero_licitacao": "001/2026",
+        "numero_sequencial_item_licitacao": "1",
+        "data_realizacao_licitacao": "2026/15/03",
+        "valor_vencedor_item_licitacao": "NaN",
+    })
+
+    erros = resultado["_erros_normalizacao"]
+    assert erros["data_realizacao_licitacao"]["valor_original"] == "'2026/15/03'"
+    assert erros["valor_vencedor_item_licitacao"]["valor_original"] == "'NaN'"
+    assert resultado["data_realizacao_licitacao"] is None
+    assert resultado["valor_vencedor_item_licitacao"] is None
+
+    from src.quality.validators import validar_itens
+    validacao = validar_itens([resultado])
+    assert validacao.validos == []
+    assert validacao.invalidos == [
+        (resultado, "valor_vencedor_item_licitacao com valor numerico invalido")
+    ]
+
+
 def test_para_numero_aceita_string():
-    assert para_numero("123.45") == 123.45
+    assert para_numero("123.45") == Decimal("123.45")
+
+
+def test_para_numero_preserva_precisao_decimal_e_nao_inventa_formato_local():
+    assert para_numero("999999999999999999.01") == Decimal("999999999999999999.01")
+    assert para_numero("1.234,56") is None
+
+
+def test_para_numero_rejeita_decimais_nao_finitos():
+    assert para_numero("NaN") is None
+    assert para_numero("Infinity") is None
+    assert para_numero("-Infinity") is None
 
 
 def test_para_numero_vazio_retorna_none():
@@ -57,7 +93,38 @@ def test_normalizar_item_converte_numeros():
     }
     resultado = normalizar_item(bruto)
     assert resultado["numero_sequencial_item_licitacao"] == 3
-    assert resultado["valor_vencedor_item_licitacao"] == 1500.50
+    assert resultado["valor_vencedor_item_licitacao"] == Decimal("1500.50")
+
+
+def test_normalizar_item_marca_documento_nao_identificavel_como_none():
+    resultado = normalizar_item({
+        "codigo_municipio": "010",
+        "numero_licitacao": "001/2025",
+        "numero_sequencial_item_licitacao": "1",
+        "numero_documento_negociante": "2xHCF0bKSs8AbIFa/3dKVg==",
+        "valor_vencedor_item_licitacao": "1500.50",
+    })
+
+    assert resultado["numero_documento_negociante"] is None
+    assert resultado["valor_vencedor_item_licitacao"] == Decimal("1500.50")
+
+
+def test_item_sequencial_invalido_nao_impede_os_registros_seguinte():
+    from src.quality.validators import validar_itens
+
+    invalido = normalizar_item({
+        "codigo_municipio": "010", "numero_licitacao": "001/2026",
+        "numero_sequencial_item_licitacao": "sem-sequencia",
+    })
+    valido = normalizar_item({
+        "codigo_municipio": "010", "numero_licitacao": "001/2026",
+        "numero_sequencial_item_licitacao": "02",
+    })
+    resultado = validar_itens([invalido, valido])
+
+    assert resultado.validos == [valido]
+    assert resultado.invalidos[0][1] == "numero_sequencial_item_licitacao invalido"
+    assert resultado.invalidos[0][0]["_erros_normalizacao"]["numero_sequencial_item_licitacao"]["valor_original"] == "'sem-sequencia'"
 
 
 def test_normalizar_datas_e_preserva_sequencia_ausente():

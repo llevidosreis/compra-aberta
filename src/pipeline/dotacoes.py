@@ -11,6 +11,7 @@ from src.pipeline.control import (
     buscar_execucao_incompleta,
     concluir_execucao,
     iniciar_execucao,
+    reabrir_execucao,
     registrar_erro,
 )
 from src.transform.normalize import normalizar_dotacao
@@ -42,6 +43,9 @@ def executar(config: Config, data_inicio: str, data_fim: str) -> None:
                         conn, "tce_dotacoes", "dotacoes",
                         codigo_municipio, data_inicio, data_fim,
                     )
+                elif execucao.status == "erro":
+                    reabrir_execucao(conn, execucao.id)
+                    execucao.status = "em_andamento"
 
             for pagina, start_index in client.listar_dotacoes_utilizadas(
                 codigo_municipio, data_inicio, data_fim,
@@ -51,7 +55,10 @@ def executar(config: Config, data_inicio: str, data_fim: str) -> None:
                 with conexao(config) as conn:
                     upsert_dotacoes(conn, registros)
                     atualizar_start_index(
-                        conn, execucao.id, start_index + len(pagina)
+                        # O cliente usa offsets fixos de TCE_PAGE_SIZE. Uma
+                        # página curta não prova que é a última e não pode
+                        # alterar o próximo offset confirmado.
+                        conn, execucao.id, start_index + config.tce_page_size
                     )
                 total += len(registros)
 

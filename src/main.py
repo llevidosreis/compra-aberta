@@ -11,7 +11,10 @@ import argparse
 import logging
 import sys
 
+from src.clients.opencnpj_client import OpenCNPJClient
 from src.config import carregar_config
+from src.enrich.enrich_empresas import enriquecer_empresas_pendentes
+from src.pipeline import dotacoes, full_load, incremental, reprocessar
 
 
 def configurar_logging():
@@ -49,6 +52,15 @@ def main():
         required=True,
         help="YYYY-MM-DD",
     )
+    parser_full.add_argument(
+        "--pular-enriquecimento",
+        action="store_true",
+        help="Publica os fatos TCE sem consultar todas as empresas no OpenCNPJ",
+    )
+    parser_full.add_argument(
+        "--inicial",
+        help="Carrega apenas municípios cujo nome começa com esta letra",
+    )
 
     parser_incremental = subparsers.add_parser(
         "incremental",
@@ -60,6 +72,22 @@ def main():
         type=int,
         default=7,
         help="Janela retroativa em dias",
+    )
+    parser_incremental.add_argument(
+        "--pular-enriquecimento",
+        action="store_true",
+        help="Publica os fatos TCE sem consultar todas as empresas no OpenCNPJ",
+    )
+
+    parser_enriquecer = subparsers.add_parser(
+        "enriquecer",
+        help="Enriquece empresas pendentes sem recolher dados do TCE-CE; aceita limitar por período",
+    )
+    parser_enriquecer.add_argument("--data-inicio", help="YYYY-MM-DD")
+    parser_enriquecer.add_argument("--data-fim", help="YYYY-MM-DD")
+    parser_enriquecer.add_argument(
+        "--codigo-municipio",
+        help="Limita o enriquecimento ao município (requer as duas datas)",
     )
 
     parser_dotacoes = subparsers.add_parser(
@@ -109,24 +137,19 @@ def main():
     )
     parser_pag.add_argument("--saida", default="saidas", help="Pasta dos relatórios")
 
-    # ------------------------------------------------------------------
-    # PNCP
-    # ------------------------------------------------------------------
-    parser_pncp_historico = subparsers.add_parser(
-        "pncp-historico", help="Carga histórica de contratações PNCP"
+    parser_reprocessar = subparsers.add_parser(
+        "reprocessar",
+        help="Reprocessa itens de um município e período sem substituir outros fatos",
     )
-    parser_pncp_historico.add_argument("--data-inicio", required=True, help="YYYY-MM-DD")
-    parser_pncp_historico.add_argument("--data-fim", required=True, help="YYYY-MM-DD")
-
-    parser_pncp_incremental = subparsers.add_parser(
-        "pncp-incremental", help="Carga incremental de contratações PNCP"
-    )
-    parser_pncp_incremental.add_argument("--dias", type=int, default=7, help="Janela retroativa em dias")
+    parser_reprocessar.add_argument("--codigo-municipio", required=True)
+    parser_reprocessar.add_argument("--data-inicio", required=True, help="YYYY-MM-DD")
+    parser_reprocessar.add_argument("--data-fim", required=True, help="YYYY-MM-DD")
 
     args = parser.parse_args()
-    config = carregar_config(
-        exigir_banco=not (args.modo == "pagamentos" and args.sem_banco)
-    )
+    if args.modo == "pagamentos" and args.sem_banco:
+        config = carregar_config(exigir_banco=False)
+    else:
+        config = carregar_config()
 
     if args.modo == "full":
         from src.pipeline import full_load
@@ -134,6 +157,8 @@ def main():
             config,
             args.data_inicio,
             args.data_fim,
+            enriquecer=not args.pular_enriquecimento,
+            inicial=args.inicial,
         )
 
     elif args.modo == "incremental":
@@ -141,17 +166,30 @@ def main():
         incremental.executar(
             config,
             args.dias,
+            enriquecer=not args.pular_enriquecimento,
+        )
+    elif args.modo == "enriquecer":
+        if (args.data_inicio is None) != (args.data_fim is None):
+            parser.error("--data-inicio e --data-fim devem ser informados juntos.")
+        if args.codigo_municipio and args.data_inicio is None:
+            parser.error("--codigo-municipio requer --data-inicio e --data-fim.")
+        enriquecer_empresas_pendentes(
+            config,
+            OpenCNPJClient(config),
+            data_inicio=args.data_inicio,
+            data_fim=args.data_fim,
+            codigo_municipio=args.codigo_municipio,
         )
     elif args.modo == "dotacoes":
         from src.pipeline import dotacoes
         dotacoes.executar(config, args.data_inicio, args.data_fim)
-    elif args.modo == "pncp-historico":
-        from src.pipeline import pncp
-        pncp.executar_historico(config, args.data_inicio, args.data_fim)
-
-    elif args.modo == "pncp-incremental":
-        from src.pipeline import pncp
-        pncp.executar_incremental(config, args.dias)
+    elif args.modo == "reprocessar":
+        reprocessar.executar(
+            config,
+            args.codigo_municipio,
+            args.data_inicio,
+            args.data_fim,
+        )
 
     elif args.modo == "pagamentos":
         from src.pipeline import despesas_me

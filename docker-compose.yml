@@ -1,0 +1,56 @@
+
+services:
+  postgres:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: compra_livre
+      POSTGRES_USER: compra_livre
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Defina POSTGRES_PASSWORD no arquivo postgres-docker.env}
+    ports:
+      - "127.0.0.1:5433:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U compra_livre -d compra_livre"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  api:
+    build:
+      context: .
+      dockerfile: dockerfile
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: ${APP_DATABASE_URL:?Defina APP_DATABASE_URL no arquivo postgres-docker.env}
+    ports:
+      - "127.0.0.1:8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  pipeline:
+    build:
+      context: .
+      dockerfile: dockerfile
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: ${APP_DATABASE_URL:?Defina APP_DATABASE_URL no arquivo postgres-docker.env}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    entrypoint: ["python", "-m", "src.main"]
+    command: ["--help"]
+    profiles:
+      - jobs
+    volumes:
+      - ./saidas:/app/saidas
+
+volumes:
+  pgdata:
+    external: true
+    name: compra_livre_pgdata

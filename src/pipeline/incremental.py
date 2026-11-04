@@ -4,6 +4,7 @@ Carga incremental: processa uma janela recente de datas.
 
 import logging
 from datetime import date, timedelta
+from time import monotonic
 
 from src.clients.opencnpj_client import OpenCNPJClient
 from src.clients.tce_client import TCEClient
@@ -17,7 +18,12 @@ from src.pipeline.extract_common import carregar_itens, carregar_licitantes
 logger = logging.getLogger(__name__)
 
 
-def executar(config: Config, dias_retroativos: int = 7) -> None:
+def executar(
+    config: Config,
+    dias_retroativos: int = 7,
+    *,
+    enriquecer: bool = True,
+) -> None:
     if dias_retroativos < 0:
         raise ValueError("dias_retroativos não pode ser negativo")
 
@@ -30,7 +36,8 @@ def executar(config: Config, dias_retroativos: int = 7) -> None:
     data_fim = hoje.isoformat()
 
     tce_client = TCEClient(config)
-    opencnpj_client = OpenCNPJClient(config)
+    opencnpj_client = OpenCNPJClient(config) if enriquecer else None
+    inicio_execucao = monotonic()
 
     logger.info(
         "Iniciando carga incremental: %s até %s",
@@ -64,7 +71,7 @@ def executar(config: Config, dias_retroativos: int = 7) -> None:
     municipios_processados = []
 
     # ============================================================
-    # 2. EXTRAÇÃO DE TODOS OS MUNICÍPIOS
+    # 2. EXTRAÇÃO E PUBLICAÇÃO PROGRESSIVA POR MUNICÍPIO
     # ============================================================
 
     for municipio in municipios:
@@ -82,6 +89,7 @@ def executar(config: Config, dias_retroativos: int = 7) -> None:
                 data_inicio,
                 data_fim,
                 "incremental",
+                limpar_staging=False,
             )
 
             carregar_itens(
@@ -91,15 +99,33 @@ def executar(config: Config, dias_retroativos: int = 7) -> None:
                 data_inicio,
                 data_fim,
                 "incremental",
+                limpar_staging=False,
             )
 
+            logger.info(
+                "Transformando e publicando fatos do município %s (código=%s).",
+                municipio.nome,
+                municipio.codigo_municipio,
+            )
+            with conexao(config) as conn:
+                transformar_fatos_do_municipio(
+                    conn,
+                    municipio.codigo_municipio,
+                )
+
             municipios_processados.append(municipio)
+            logger.info(
+                "Município publicado: código=%s progresso=%d/%d",
+                municipio.codigo_municipio,
+                len(municipios_processados),
+                len(municipios),
+            )
 
         except Exception as erro:
             municipios_com_erro.append(municipio.codigo_municipio)
 
             logger.exception(
-                "ERRO na extração do município %s "
+                "ERRO ao processar o município %s "
                 "(codigo=%s). O município será ignorado "
                 "e a carga continuará. Erro: %s",
                 municipio.nome,
@@ -110,66 +136,29 @@ def executar(config: Config, dias_retroativos: int = 7) -> None:
             continue
 
     # ============================================================
-    # 3. ENRIQUECIMENTO OPEN CNPJ
-    #    EXECUTADO UMA ÚNICA VEZ
+    # ============================================================
+    # 3. ENRIQUECIMENTO OPEN CNPJ (OPCIONAL)
     # ============================================================
 
-    try:
-        logger.info(
-            "Iniciando enriquecimento global das empresas "
-            "após a extração dos municípios."
-        )
-
-        total_enriquecido = enriquecer_empresas_pendentes(
-            config,
-            opencnpj_client,
-        )
-
-        logger.info(
-            "Enriquecimento global concluído: %d empresas.",
-            total_enriquecido,
-        )
-
-    except Exception as erro:
-        logger.exception(
-            "ERRO no enriquecimento global via OpenCNPJ."
-        )
-
-        raise RuntimeError(
-            "O enriquecimento global via OpenCNPJ falhou."
-        ) from erro
-
-    # ============================================================
-    # 4. TRANSFORMAÇÃO DOS FATOS
-    # ============================================================
-
-    for municipio in municipios_processados:
+    erro_enriquecimento = None
+    if enriquecer:
         try:
-            logger.info(
-                "Transformando fatos do município %s "
-                "(codigo_municipio=%s).",
-                municipio.nome,
-                municipio.codigo_municipio,
+            logger.info("Iniciando enriquecimento global via OpenCNPJ.")
+            total_enriquecido = enriquecer_empresas_pendentes(
+                config,
+                opencnpj_client,
+                data_inicio=data_inicio,
+                data_fim=data_fim,
             )
-
-            with conexao(config) as conn:
-                transformar_fatos_do_municipio(
-                    conn,
-                    municipio.codigo_municipio,
-                )
-                from src.load.load_staging import limpar_staging_municipio
-                limpar_staging_municipio(conn, municipio.codigo_municipio)
-
+            logger.info("Enriquecimento global concluído: %d empresas.", total_enriquecido)
         except Exception as erro:
-            municipios_com_erro.append(municipio.codigo_municipio)
-
-            logger.exception(
-                "ERRO ao transformar fatos do município %s "
-                "(codigo=%s). Erro: %s",
-                municipio.nome,
-                municipio.codigo_municipio,
-                erro,
-            )
+            logger.exception("ERRO no enriquecimento global via OpenCNPJ.")
+            erro_enriquecimento = erro
+    else:
+        logger.info(
+            "Enriquecimento OpenCNPJ adiado; use o comando enriquecer "
+            "com o período carregado."
+        )
 
     # ============================================================
     # 5. RESULTADO FINAL
@@ -191,8 +180,15 @@ def executar(config: Config, dias_retroativos: int = 7) -> None:
             f"{', '.join(municipios_unicos)}"
         )
 
+    if erro_enriquecimento:
+        raise RuntimeError(
+            "Os fatos TCE foram processados, mas o enriquecimento OpenCNPJ falhou."
+        ) from erro_enriquecimento
+
     logger.info(
-        "Carga incremental finalizada com sucesso. "
-        "%d municípios processados.",
+        "Carga incremental finalizada com sucesso. %d/%d municípios publicados "
+        "em %.1f segundos.",
         len(municipios_processados),
+        len(municipios),
+        monotonic() - inicio_execucao,
     )
